@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,13 +23,10 @@ import java.util.Set;
 /**
  * A tokenizer for the Blaze query language, revision 2.
  *
- * Note, we can avoid a lot of quoting by noting that the characters [() ,] do
- * not appear in any label, filename, function name, or regular expression we care about.
- *
  * No string escapes are allowed ("\").  Given the domain, that's not currently
  * a problem.
  */
-final class Lexer {
+public final class Lexer {
 
   /**
    * Discriminator for different kinds of tokens.
@@ -116,23 +113,23 @@ final class Lexer {
   }
 
   /**
-   * Entry point to the lexer.  Returns the list of tokens for the specified
-   * input, or throws QueryException.
+   * Entry point to the lexer. Returns the list of tokens for the specified input, or throws
+   * QueryException.
    */
-  public static List<Token> scan(char[] buffer) throws QueryException {
-    Lexer lexer = new Lexer(buffer);
+  static List<Token> scan(String input) throws QuerySyntaxException {
+    Lexer lexer = new Lexer(input);
     lexer.tokenize();
     return lexer.tokens;
   }
 
   // Input buffer and position
-  private char[] buffer;
+  private String input;
   private int pos;
 
   private final List<Token> tokens = new ArrayList<>();
 
-  private Lexer(char[] buffer) {
-    this.buffer = buffer;
+  private Lexer(String input) {
+    this.input = input;
     this.pos = 0;
   }
 
@@ -143,15 +140,15 @@ final class Lexer {
   /**
    * Scans a quoted word delimited by 'quot'.
    *
-   * ON ENTRY: 'pos' is 1 + the index of the first delimiter
-   * ON EXIT: 'pos' is 1 + the index of the last delimiter.
+   * <p>ON ENTRY: 'pos' is 1 + the index of the first delimiter ON EXIT: 'pos' is 1 + the index of
+   * the last delimiter.
    *
    * @return the word token.
    */
-  private Token quotedWord(char quot) throws QueryException {
+  private Token quotedWord(char quot) throws QuerySyntaxException {
     int oldPos = pos - 1;
-    while (pos < buffer.length) {
-      char c = buffer[pos++];
+    while (pos < input.length()) {
+      char c = input.charAt(pos++);
       switch (c) {
         case '\'':
         case '"':
@@ -161,7 +158,7 @@ final class Lexer {
           }
       }
     }
-    throw new QueryException("unclosed quotation");
+    throw new QuerySyntaxException("unclosed quotation");
   }
 
   private TokenKind getTokenKindForWord(String word) {
@@ -169,13 +166,10 @@ final class Lexer {
     return kind == null ? TokenKind.WORD : kind;
   }
 
-  // Unquoted words may contain [-*$], but not start with them.  For user convenience, unquoted
-  // words must include UNIX filenames, labels and target label patterns, and simple regexps
-  // (e.g. cc_.*). Keep consistent with TargetLiteral.toString()!
   private String scanWord() {
     int oldPos = pos - 1;
-    while (pos < buffer.length) {
-      switch (buffer[pos]) {
+    while (pos < input.length()) {
+      switch (input.charAt(pos)) {
         case 'a': case 'b': case 'c': case 'd': case 'e': case 'f':
         case 'g': case 'h': case 'i': case 'j': case 'k': case 'l':
         case 'm': case 'n': case 'o': case 'p': case 'q': case 'r':
@@ -189,7 +183,9 @@ final class Lexer {
         case '0': case '1': case '2': case '3': case '4': case '5':
         case '6': case '7': case '8': case '9':
         case '*': case '/': case '@': case '.': case '-': case '_':
-        case ':': case '$':
+        case ':':
+        case '$':
+        case '~':
           pos++;
           break;
        default:
@@ -213,13 +209,10 @@ final class Lexer {
     return kind == TokenKind.WORD ? new Token(word) : new Token(kind);
   }
 
-  /**
-   * Performs tokenization of the character buffer of file contents provided to
-   * the constructor.
-   */
-  private void tokenize() throws QueryException {
-    while (pos < buffer.length) {
-      char c = buffer[pos];
+  /** Performs tokenization of the character buffer of file contents provided to the constructor. */
+  private void tokenize() throws QuerySyntaxException {
+    while (pos < input.length()) {
+      char c = input.charAt(pos);
       pos++;
       switch (c) {
       case '(': {
@@ -271,11 +264,11 @@ final class Lexer {
 
     addToken(new Token(TokenKind.EOF));
 
-    this.buffer = null; // release buffer now that we have our tokens
+    this.input = null; // release buffer now that we have our tokens
   }
 
   private String bufferSlice(int start, int end) {
-    return new String(this.buffer, start, end - start);
+    return this.input.substring(start, end);
   }
 
 }

@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,54 +13,62 @@
 // limitations under the License.
 package com.google.devtools.build.lib.util;
 
-import com.google.common.collect.Sets;
-import com.google.devtools.build.lib.testutil.MoreAsserts;
-import com.google.devtools.build.lib.testutil.Scratch;
-import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import static com.google.common.truth.Truth.assertThat;
 
+import com.google.common.collect.Sets;
+import com.google.devtools.build.lib.testutil.Scratch;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
+import com.google.devtools.build.lib.vfs.FileSystem;
+import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.windows.WindowsFileSystem;
+import java.util.Set;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.util.Set;
 
 @RunWith(JUnit4.class)
 public class DependencySetWindowsTest {
 
   private Scratch scratch = new Scratch();
+  private final FileSystem fileSystem =
+      new WindowsFileSystem(DigestHashFunction.SHA256, /*createSymbolicLinks=*/ false);
+  private final Path root = fileSystem.getPath("C:/");
 
   private DependencySet newDependencySet() {
-    return new DependencySet(scratch.resolve("/"));
+    return new DependencySet(root);
   }
 
   @Test
   public void dotDParser_windowsPaths() throws Exception {
-    Path dotd = scratch.file("/tmp/foo.d",
-        "bazel-out/hello-lib/cpp/hello-lib.o: \\",
-        " cpp/hello-lib.cc cpp/hello-lib.h c:\\mingw\\include\\stdio.h \\",
-        " c:\\mingw\\include\\_mingw.h \\",
-        " c:\\mingw\\lib\\gcc\\mingw32\\4.8.1\\include\\stdarg.h");
+    Path dotd =
+        scratch.file(
+            "/tmp/foo.d",
+            "bazel-out/hello-lib/cpp/hello-lib.o: \\",
+            " cpp/hello-lib.cc cpp/hello-lib.h c:\\mingw\\include\\stdio.h \\",
+            " c:\\mingw\\include\\_mingw.h \\",
+            " c:\\mingw\\lib\\gcc\\mingw32\\4.8.1\\include\\stdarg.h");
 
-    Set<PathFragment> expected = Sets.newHashSet(
-        new PathFragment("cpp/hello-lib.cc"),
-        new PathFragment("cpp/hello-lib.h"),
-        new PathFragment("C:/mingw/include/stdio.h"),
-        new PathFragment("C:/mingw/include/_mingw.h"),
-        new PathFragment("C:/mingw/lib/gcc/mingw32/4.8.1/include/stdarg.h"));
+    Set<Path> expected =
+        Sets.newHashSet(
+            root.getRelative("cpp/hello-lib.cc"),
+            root.getRelative("cpp/hello-lib.h"),
+            fileSystem.getPath("C:/mingw/include/stdio.h"),
+            fileSystem.getPath("C:/mingw/include/_mingw.h"),
+            fileSystem.getPath("C:/mingw/lib/gcc/mingw32/4.8.1/include/stdarg.h"));
 
-    MoreAsserts.assertSameContents(expected,
-        newDependencySet().read(dotd).getDependencies());
+    assertThat(newDependencySet().read(dotd).getDependencies()).containsExactlyElementsIn(expected);
   }
 
   @Test
   public void dotDParser_windowsPathsWithSpaces() throws Exception {
-    Path dotd = scratch.file("/tmp/foo.d",
-        "bazel-out/hello-lib/cpp/hello-lib.o: \\",
-        "C:\\Program\\ Files\\ (x86)\\LLVM\\stddef.h");
-    MoreAsserts.assertSameContents(
-        Sets.newHashSet(new PathFragment("C:/Program Files (x86)/LLVM/stddef.h")),
-        newDependencySet().read(dotd).getDependencies());
+    Path dotd =
+        scratch.file(
+            "/tmp/foo.d",
+            "bazel-out/hello-lib/cpp/hello-lib.o: \\",
+            "C:\\Program\\ Files\\ (x86)\\LLVM\\stddef.h");
+    assertThat(newDependencySet().read(dotd).getDependencies())
+        .containsExactlyElementsIn(
+            Sets.newHashSet(fileSystem.getPath("C:/Program Files (x86)/LLVM/stddef.h")));
   }
 
   @Test
@@ -68,22 +76,36 @@ public class DependencySetWindowsTest {
     // This is (slightly simplified) actual output from clang. Yes, clang will happily mix
     // forward slashes and backslashes in a single path, not to mention using backslashes as
     // separators next to backslashes as escape characters.
-    Path dotd = scratch.file("/tmp/foo.d",
-        "bazel-out/hello-lib/cpp/hello-lib.o: \\",
-        "cpp/hello-lib.cc cpp/hello-lib.h /mingw/include\\stdio.h \\",
-        "/mingw/include\\_mingw.h \\",
-        "C:\\Program\\ Files\\ (x86)\\LLVM\\bin\\..\\lib\\clang\\3.5.0\\include\\stddef.h \\",
-        "C:\\Program\\ Files\\ (x86)\\LLVM\\bin\\..\\lib\\clang\\3.5.0\\include\\stdarg.h");
+    Path dotd =
+        scratch.file(
+            "/tmp/foo.d",
+            "bazel-out/hello-lib/cpp/hello-lib.o: \\",
+            "cpp/hello-lib.cc cpp/hello-lib.h /mingw/include\\stdio.h \\",
+            "/mingw/include\\_mingw.h \\",
+            "C:\\Program\\ Files\\ (x86)\\LLVM\\bin\\..\\lib\\clang\\3.5.0\\include\\stddef.h \\",
+            "C:\\Program\\ Files\\ (x86)\\LLVM\\bin\\..\\lib\\clang\\3.5.0\\include\\stdarg.h");
 
-    Set<PathFragment> expected = Sets.newHashSet(
-        new PathFragment("cpp/hello-lib.cc"),
-        new PathFragment("cpp/hello-lib.h"),
-        new PathFragment("/mingw/include/stdio.h"),
-        new PathFragment("/mingw/include/_mingw.h"),
-        new PathFragment("C:/Program Files (x86)/LLVM/lib/clang/3.5.0/include/stddef.h"),
-        new PathFragment("C:/Program Files (x86)/LLVM/lib/clang/3.5.0/include/stdarg.h"));
+    Set<Path> expected =
+        Sets.newHashSet(
+            root.getRelative("cpp/hello-lib.cc"),
+            root.getRelative("cpp/hello-lib.h"),
+            fileSystem.getPath("C:/fake/msys/mingw/include/stdio.h"),
+            fileSystem.getPath("C:/fake/msys/mingw/include/_mingw.h"),
+            fileSystem.getPath("C:/Program Files (x86)/LLVM/lib/clang/3.5.0/include/stddef.h"),
+            fileSystem.getPath("C:/Program Files (x86)/LLVM/lib/clang/3.5.0/include/stdarg.h"));
 
-    MoreAsserts.assertSameContents(expected,
-        newDependencySet().read(dotd).getDependencies());
+    assertThat(newDependencySet().read(dotd).getDependencies()).containsExactlyElementsIn(expected);
+  }
+
+  @Test
+  public void dotDParser_caseInsensitive() throws Exception {
+    Path file1 = fileSystem.getPath("C:/blah/blah/genhello/hello.cc");
+    Path file2 = fileSystem.getPath("C:/blah/blah/genhello/hello.h");
+    Path file2DiffCase = fileSystem.getPath("C:/Blah/blah/Genhello/hello.h");
+    String filename = "hello.o";
+    Path dotd =
+        scratch.file("/tmp/foo.d", filename + ": \\", " " + file1 + " \\", " " + file2 + " ");
+    assertThat(newDependencySet().read(dotd).getDependencies())
+        .containsExactly(file1, file2DiffCase);
   }
 }

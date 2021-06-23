@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -42,10 +42,8 @@ public interface OutputFilter {
    */
   boolean showOutput(String tag);
 
-  /**
-   * An output filter using regular expression matching.
-   */
-  public static final class RegexOutputFilter implements OutputFilter {
+  /** An output filter using regular expression matching. */
+  final class RegexOutputFilter implements OutputFilter {
     /** Returns an output filter for the given regex (by compiling it). */
     public static OutputFilter forRegex(String regex) {
       return new RegexOutputFilter(Pattern.compile(regex));

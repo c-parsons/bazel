@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,83 +14,226 @@
 
 package com.google.devtools.build.lib.skyframe;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import com.google.common.base.MoreObjects;
+import com.google.common.collect.Interner;
+import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.syntax.Label;
+import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.concurrent.BlazeInterners;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.skyframe.SkyFunctionName;
-
 import java.util.Objects;
-
 import javax.annotation.Nullable;
 
 /**
- *  A (Label, Configuration) pair. Note that this pair may be used to look up the generating action
- * of an artifact. Callers may want to ensure that they have the correct configuration for this
- * purpose by passing in {@link BuildConfiguration#getArtifactOwnerConfiguration} in preference to
- * the raw configuration.
+ * A (Label, Configuration key) pair. Note that this pair may be used to look up the generating
+ * action of an artifact.
  */
-public class ConfiguredTargetKey extends ActionLookupValue.ActionLookupKey {
-  private final Label label;
-  @Nullable
-  private final BuildConfiguration configuration;
+@AutoCodec
+public class ConfiguredTargetKey implements ActionLookupKey {
+  /**
+   * Cache so that the number of ConfiguredTargetKey instances is {@code O(configured targets)} and
+   * not {@code O(edges between configured targets)}.
+   */
+  private static final Interner<ConfiguredTargetKey> interner = BlazeInterners.newWeakInterner();
 
-  public ConfiguredTargetKey(Label label, @Nullable BuildConfiguration configuration) {
-    this.label = Preconditions.checkNotNull(label);
-    this.configuration = configuration;
+  private final Label label;
+  @Nullable private final BuildConfigurationValue.Key configurationKey;
+
+  private final transient int hashCode;
+
+  ConfiguredTargetKey(
+      Label label, @Nullable BuildConfigurationValue.Key configurationKey, int hashCode) {
+    this.label = checkNotNull(label);
+    this.configurationKey = configurationKey;
+    this.hashCode = hashCode;
   }
 
-  public ConfiguredTargetKey(ConfiguredTarget rule) {
-    this(rule.getTarget().getLabel(), rule.getConfiguration());
+  @AutoCodec.VisibleForSerialization
+  @AutoCodec.Instantiator
+  static ConfiguredTargetKey create(
+      Label label, @Nullable BuildConfigurationValue.Key configurationKey) {
+    int hashCode = computeHashCode(label, configurationKey, /*toolchainContextKey=*/ null);
+    return interner.intern(new ConfiguredTargetKey(label, configurationKey, hashCode));
+  }
+
+  public Builder toBuilder() {
+    return builder()
+        .setConfigurationKey(configurationKey)
+        .setLabel(label)
+        .setToolchainContextKey(getToolchainContextKey());
   }
 
   @Override
-  public Label getLabel() {
+  public final Label getLabel() {
     return label;
   }
 
   @Override
-  SkyFunctionName getType() {
+  public final SkyFunctionName functionName() {
     return SkyFunctions.CONFIGURED_TARGET;
   }
 
   @Nullable
-  public BuildConfiguration getConfiguration() {
-    return configuration;
+  public final BuildConfigurationValue.Key getConfigurationKey() {
+    return configurationKey;
+  }
+
+  @Nullable
+  ToolchainContextKey getToolchainContextKey() {
+    return null;
   }
 
   @Override
-  public int hashCode() {
-    int configVal = configuration == null ? 79 : configuration.hashCode();
-    return 31 * label.hashCode() + configVal;
+  public final int hashCode() {
+    return hashCode;
+  }
+
+  private static int computeHashCode(
+      Label label,
+      @Nullable BuildConfigurationValue.Key configurationKey,
+      @Nullable ToolchainContextKey toolchainContextKey) {
+    int configVal = configurationKey == null ? 79 : configurationKey.hashCode();
+    int toolchainContextVal = toolchainContextKey == null ? 47 : toolchainContextKey.hashCode();
+    return 31 * label.hashCode() + configVal + toolchainContextVal;
   }
 
   @Override
-  public boolean equals(Object obj) {
+  public final boolean equals(Object obj) {
     if (this == obj) {
       return true;
-    }
-    if (obj == null) {
-      return false;
     }
     if (!(obj instanceof ConfiguredTargetKey)) {
       return false;
     }
     ConfiguredTargetKey other = (ConfiguredTargetKey) obj;
-    return Objects.equals(label, other.label) && Objects.equals(configuration, other.configuration);
+    return hashCode == other.hashCode
+        && label.equals(other.label)
+        && Objects.equals(configurationKey, other.configurationKey)
+        && Objects.equals(getToolchainContextKey(), other.getToolchainContextKey());
   }
 
-  public String prettyPrint() {
+  public final String prettyPrint() {
     if (label == null) {
       return "null";
     }
-    return (configuration != null && configuration.isHostConfiguration())
-        ? (label + " (host)") : label.toString();
+    return String.format(
+        "%s (%s)",
+        label, configurationKey == null ? "null" : configurationKey.getOptions().checksum());
   }
 
   @Override
-  public String toString() {
-    return label + " " + (configuration == null ? "null" : configuration.checksum());
+  public final String toString() {
+    // TODO(b/162809183): consider reverting to less verbose toString when bug is resolved.
+    MoreObjects.ToStringHelper helper =
+        MoreObjects.toStringHelper(this).add("label", label).add("config", configurationKey);
+    if (getToolchainContextKey() != null) {
+      helper.add("toolchainContextKey", getToolchainContextKey());
+    }
+    return helper.toString();
   }
 
+  @AutoCodec.VisibleForSerialization
+  @AutoCodec
+  static class ConfiguredTargetKeyWithToolchainContext extends ConfiguredTargetKey {
+    private static final Interner<ConfiguredTargetKeyWithToolchainContext>
+        withToolchainContextInterner = BlazeInterners.newWeakInterner();
+
+    private final ToolchainContextKey toolchainContextKey;
+
+    private ConfiguredTargetKeyWithToolchainContext(
+        Label label,
+        @Nullable BuildConfigurationValue.Key configurationKey,
+        int hashCode,
+        ToolchainContextKey toolchainContextKey) {
+      super(label, configurationKey, hashCode);
+      this.toolchainContextKey = checkNotNull(toolchainContextKey);
+    }
+
+    @AutoCodec.VisibleForSerialization
+    @AutoCodec.Instantiator
+    static ConfiguredTargetKeyWithToolchainContext create(
+        Label label,
+        @Nullable BuildConfigurationValue.Key configurationKey,
+        ToolchainContextKey toolchainContextKey) {
+      int hashCode = computeHashCode(label, configurationKey, toolchainContextKey);
+      return withToolchainContextInterner.intern(
+          new ConfiguredTargetKeyWithToolchainContext(
+              label, configurationKey, hashCode, toolchainContextKey));
+    }
+
+    @Override
+    final ToolchainContextKey getToolchainContextKey() {
+      return toolchainContextKey;
+    }
+  }
+
+  /** Returns a new {@link Builder} to create instances of {@link ConfiguredTargetKey}. */
+  public static Builder builder() {
+    return new Builder();
+  }
+
+  /** A helper class to create instances of {@link ConfiguredTargetKey}. */
+  public static final class Builder {
+    private Label label = null;
+    private BuildConfigurationValue.Key configurationKey = null;
+    private ToolchainContextKey toolchainContextKey = null;
+
+    private Builder() {}
+
+    /** Sets the label for the target. */
+    public Builder setLabel(Label label) {
+      this.label = label;
+      return this;
+    }
+
+    /**
+     * Sets the {@link ConfiguredTarget} that we want a key for.
+     *
+     * <p>This sets both the label and configurationKey data.
+     */
+    public Builder setConfiguredTarget(ConfiguredTarget configuredTarget) {
+      setLabel(configuredTarget.getOriginalLabel());
+      if (this.configurationKey == null) {
+        setConfigurationKey(configuredTarget.getConfigurationKey());
+      }
+      return this;
+    }
+
+    /** Sets the {@link BuildConfiguration} for the configured target. */
+    public Builder setConfiguration(@Nullable BuildConfiguration buildConfiguration) {
+      if (buildConfiguration == null) {
+        return setConfigurationKey(null);
+      } else {
+        return setConfigurationKey(BuildConfigurationValue.key(buildConfiguration));
+      }
+    }
+
+    /** Sets the configuration key for the configured target. */
+    public Builder setConfigurationKey(@Nullable BuildConfigurationValue.Key configurationKey) {
+      this.configurationKey = configurationKey;
+      return this;
+    }
+
+    /**
+     * Sets the {@link ToolchainContextKey} this configured target should use for toolchain
+     * resolution. When present, this overrides the normally determined toolchain context.
+     */
+    public Builder setToolchainContextKey(@Nullable ToolchainContextKey toolchainContextKey) {
+      this.toolchainContextKey = toolchainContextKey;
+      return this;
+    }
+
+    /** Builds a new {@link ConfiguredTargetKey} based on the supplied data. */
+    public ConfiguredTargetKey build() {
+      if (this.toolchainContextKey != null) {
+        return ConfiguredTargetKeyWithToolchainContext.create(
+            label, configurationKey, toolchainContextKey);
+      }
+      return create(label, configurationKey);
+    }
+  }
 }

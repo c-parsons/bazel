@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,24 +14,14 @@
 package com.google.devtools.build.lib.vfs;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Ordering;
 import com.google.common.util.concurrent.Uninterruptibles;
-import com.google.devtools.build.lib.testutil.MoreAsserts;
 import com.google.devtools.build.lib.testutil.TestUtils;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
-
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
-
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -47,6 +37,11 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /**
  * Tests {@link UnixGlob}
@@ -57,17 +52,30 @@ public class GlobTest {
   private Path tmpPath;
   private FileSystem fs;
   private Path throwOnReaddir = null;
+  private Path throwOnStat = null;
+
   @Before
-  public void setUp() throws Exception {
-    fs = new InMemoryFileSystem() {
-      @Override
-      public Collection<Dirent> readdir(Path path, boolean followSymlinks) throws IOException {
-        if (path.equals(throwOnReaddir)) {
-          throw new FileNotFoundException(path.getPathString());
-        }
-        return super.readdir(path, followSymlinks);
-      }
-    };
+  public final void initializeFileSystem() throws Exception  {
+    fs =
+        new InMemoryFileSystem(DigestHashFunction.SHA256) {
+          @Override
+          public Collection<Dirent> readdir(PathFragment path, boolean followSymlinks)
+              throws IOException {
+            if (throwOnReaddir != null && throwOnReaddir.asFragment().equals(path)) {
+              throw new FileNotFoundException(path.getPathString());
+            }
+            return super.readdir(path, followSymlinks);
+          }
+
+          @Override
+          public FileStatus statIfFound(PathFragment path, boolean followSymlinks)
+              throws IOException {
+            if (throwOnStat != null && throwOnStat.asFragment().equals(path)) {
+              throw new FileNotFoundException(path.getPathString());
+            }
+            return super.statIfFound(path, followSymlinks);
+          }
+        };
     tmpPath = fs.getPath("/globtmp");
     for (String dir : ImmutableList.of("foo/bar/wiz",
                          "foo/barnacle/wiz",
@@ -76,6 +84,11 @@ public class GlobTest {
       FileSystemUtils.createDirectoryAndParents(tmpPath.getRelative(dir));
     }
     FileSystemUtils.createEmptyFile(tmpPath.getRelative("foo/bar/wiz/file"));
+  }
+
+  @After
+  public void resetInteruppt() {
+    Thread.interrupted();
   }
 
   @Test
@@ -159,80 +172,19 @@ public class GlobTest {
     assertGlobMatches("foo/bar/wiz/file/*" /* => nothing */);
   }
 
-  @Test
-  public void testSingleFileExclude() throws Exception {
-    assertGlobWithExcludeMatches("*", "food", "foo", "fool");
-  }
-
-  @Test
-  public void testExcludeAll() throws Exception {
-    assertGlobWithExcludeMatches("*", "*");
-  }
-
-  @Test
-  public void testExcludeAllButNoMatches() throws Exception {
-    assertGlobWithExcludeMatches("not-there", "*");
-  }
-
-  @Test
-  public void testSingleFileExcludeDoesntMatch() throws Exception {
-    assertGlobWithExcludeMatches("food", "foo", "food");
-  }
-
-  @Test
-  public void testSingleFileExcludeForDirectoryWithChildGlob()
-      throws Exception {
-    assertGlobWithExcludeMatches("foo/*", "foo", "foo/bar", "foo/barnacle");
-  }
-
-  @Test
-  public void testChildGlobWithChildExclude()
-      throws Exception {
-    assertGlobWithExcludeMatches("foo/*", "foo/*");
-    assertGlobWithExcludeMatches("foo/bar", "foo/*");
-    assertGlobWithExcludeMatches("foo/bar", "foo/bar");
-    assertGlobWithExcludeMatches("foo/bar", "*/bar");
-    assertGlobWithExcludeMatches("foo/bar", "*/*");
-    assertGlobWithExcludeMatches("foo/bar/wiz", "*/*/*");
-    assertGlobWithExcludeMatches("foo/bar/wiz", "foo/*/*");
-    assertGlobWithExcludeMatches("foo/bar/wiz", "foo/bar/*");
-    assertGlobWithExcludeMatches("foo/bar/wiz", "foo/bar/wiz");
-    assertGlobWithExcludeMatches("foo/bar/wiz", "*/bar/wiz");
-    assertGlobWithExcludeMatches("foo/bar/wiz", "*/*/wiz");
-    assertGlobWithExcludeMatches("foo/bar/wiz", "foo/*/wiz");
-  }
-
   private void assertGlobMatches(String pattern, String... expecteds)
       throws Exception {
-    assertGlobWithExcludesMatches(
-        Collections.singleton(pattern), Collections.<String>emptyList(),
-        expecteds);
+    assertGlobMatches(Collections.singleton(pattern), expecteds);
   }
 
   private void assertGlobMatches(Collection<String> pattern,
                                  String... expecteds)
       throws Exception {
-    assertGlobWithExcludesMatches(pattern, Collections.<String>emptyList(),
-        expecteds);
-  }
-
-  private void assertGlobWithExcludeMatches(String pattern, String exclude,
-                                            String... expecteds)
-      throws Exception {
-    assertGlobWithExcludesMatches(
-        Collections.singleton(pattern), Collections.singleton(exclude),
-        expecteds);
-  }
-
-  private void assertGlobWithExcludesMatches(Collection<String> pattern,
-                                             Collection<String> excludes,
-                                             String... expecteds)
-      throws Exception {
-    MoreAsserts.assertSameContents(resolvePaths(expecteds),
+    assertThat(
         new UnixGlob.Builder(tmpPath)
             .addPatterns(pattern)
-            .addExcludes(excludes)
-            .globInterruptible());
+            .globInterruptible())
+    .containsExactlyElementsIn(resolvePaths(expecteds));
   }
 
   private Set<Path> resolvePaths(String... relativePaths) {
@@ -247,31 +199,66 @@ public class GlobTest {
   }
 
   @Test
+  public void testIOFailureOnStat() throws Exception {
+    UnixGlob.FilesystemCalls syscalls =
+        new UnixGlob.FilesystemCalls() {
+          @Override
+          public FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException {
+            throw new IOException("EIO");
+          }
+
+          @Override
+          public Collection<Dirent> readdir(Path path) {
+            throw new IllegalStateException();
+          }
+
+          @Override
+          public Dirent.Type getType(Path path, Symlinks symlinks) {
+            throw new IllegalStateException();
+          }
+        };
+
+    IOException e =
+        assertThrows(
+            IOException.class,
+            () ->
+                new UnixGlob.Builder(tmpPath)
+                    .addPattern("foo/bar/wiz/file")
+                    .setFilesystemCalls(new AtomicReference<>(syscalls))
+                    .glob());
+    assertThat(e).hasMessageThat().isEqualTo("EIO");
+  }
+
+  @Test
   public void testGlobWithoutWildcardsDoesNotCallReaddir() throws Exception {
-    UnixGlob.FilesystemCalls syscalls = new UnixGlob.FilesystemCalls() {
-      @Override
-      public FileStatus statNullable(Path path, Symlinks symlinks) {
-        return UnixGlob.DEFAULT_SYSCALLS.statNullable(path, symlinks);
-      }
+    UnixGlob.FilesystemCalls syscalls =
+        new UnixGlob.FilesystemCalls() {
+          @Override
+          public FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException {
+            return UnixGlob.DEFAULT_SYSCALLS.statIfFound(path, symlinks);
+          }
 
-      @Override
-      public Collection<Dirent> readdir(Path path, Symlinks symlinks) {
-        throw new IllegalStateException();
-      }
-    };
+          @Override
+          public Collection<Dirent> readdir(Path path) {
+            throw new IllegalStateException();
+          }
 
-    MoreAsserts.assertSameContents(ImmutableList.of(tmpPath.getRelative("foo/bar/wiz/file")),
-        new UnixGlob.Builder(tmpPath)
-            .addPattern("foo/bar/wiz/file")
-            .setFilesystemCalls(new AtomicReference<>(syscalls))
-            .glob());
+          @Override
+          public Dirent.Type getType(Path path, Symlinks symlinks) {
+            throw new IllegalStateException();
+          }
+        };
+
+    assertThat(
+            new UnixGlob.Builder(tmpPath)
+                .addPattern("foo/bar/wiz/file")
+                .setFilesystemCalls(new AtomicReference<>(syscalls))
+                .glob())
+        .containsExactly(tmpPath.getRelative("foo/bar/wiz/file"));
   }
 
   @Test
   public void testIllegalPatterns() throws Exception {
-    assertIllegalPattern("(illegal) pattern");
-    assertIllegalPattern("[illegal pattern");
-    assertIllegalPattern("}illegal pattern");
     assertIllegalPattern("foo**bar");
     assertIllegalPattern("");
     assertIllegalPattern(".");
@@ -292,16 +279,64 @@ public class GlobTest {
     FileSystemUtils.createDirectoryAndParents(tmpPath2);
     Path aDotB = tmpPath2.getChild("a.b");
     FileSystemUtils.createEmptyFile(aDotB);
+    Path aPlusB = tmpPath2.getChild("a+b");
+    FileSystemUtils.createEmptyFile(aPlusB);
+    Path aWordCharacterB = tmpPath2.getChild("a\\wb");
+    FileSystemUtils.createEmptyFile(aWordCharacterB);
+    Path disjunctionsAndBrackets = tmpPath2.getChild("aab|a{1,2}[ab]");
+    FileSystemUtils.createEmptyFile(disjunctionsAndBrackets);
+    Path lineNoise = tmpPath2.getChild("\\|}[{[].+");
+    FileSystemUtils.createEmptyFile(lineNoise);
     FileSystemUtils.createEmptyFile(tmpPath2.getChild("aab"));
-    // Note: this contains two asterisks because otherwise a RE is not built,
+    // Note: these contain two asterisks because otherwise a RE is not built,
     // as an optimization.
-    assertThat(UnixGlob.forPath(tmpPath2).addPattern("*a.b*").globInterruptible()).containsExactly(
-        aDotB);
+    assertThat(UnixGlob.forPath(tmpPath2).addPattern("*a.b*").globInterruptible())
+        .containsExactly(aDotB);
+    assertThat(UnixGlob.forPath(tmpPath2).addPattern("*a+b*").globInterruptible())
+        .containsExactly(aPlusB);
+    assertThat(UnixGlob.forPath(tmpPath2).addPattern("*a\\wb*").globInterruptible())
+        .containsExactly(aWordCharacterB);
+    assertThat(UnixGlob.forPath(tmpPath2).addPattern("*aab|a{1,2}[ab]*").globInterruptible())
+        .containsExactly(disjunctionsAndBrackets);
+    assertThat(UnixGlob.forPath(tmpPath2).addPattern("*\\|}[{[].+*").globInterruptible())
+        .containsExactly(lineNoise);
+  }
+
+  /**
+   * Test that '(' and ')' in glob patterns are ignored if the glob is compiled to regexp.
+   *
+   * <p>TODO(b/154003471) Change the behavior and start treating '(' and ')' as literal characters
+   * in glob patterns. This will require an incompatible flag.
+   */
+  @Test
+  public void testParenthesesInRegex() throws Exception {
+    Path tmpPath3 = fs.getPath("/globtmp3");
+    FileSystemUtils.createDirectoryAndParents(tmpPath3);
+    Path fooBar = tmpPath3.getChild("foo bar");
+    FileSystemUtils.createEmptyFile(fooBar);
+    Path fooBarInParentheses = tmpPath3.getChild("foo (bar)");
+    FileSystemUtils.createEmptyFile(fooBarInParentheses);
+    // Note: these contain two asterisks because otherwise a RE is not built,
+    // as an optimization.
+    assertThat(UnixGlob.forPath(tmpPath3).addPattern("*foo (bar)*").globInterruptible())
+        .containsExactly(fooBar);
+    assertThat(UnixGlob.forPath(tmpPath3).addPattern("(*foo bar*)").globInterruptible())
+        .containsExactly(fooBar);
+    assertThat(UnixGlob.forPath(tmpPath3).addPattern("*)((foo ))bar(*").globInterruptible())
+        .containsExactly(fooBar);
+    assertThat(UnixGlob.forPath(tmpPath3).addPattern("*foo (bar*").globInterruptible())
+        .containsExactly(fooBar);
+    assertThat(UnixGlob.forPath(tmpPath3).addPattern("*foo bar*)").globInterruptible())
+        .containsExactly(fooBar);
+    // Note: the following glob pattern doesn't contain asterisks, and a RE wouldn't be expected to
+    // be built.
+    assertThat(UnixGlob.forPath(tmpPath3).addPattern("foo (bar)").globInterruptible())
+        .containsExactly(fooBarInParentheses);
   }
 
   @Test
   public void testMatchesCallWithNoCache() {
-    assertTrue(UnixGlob.matches("*a*b", "CaCb", null));
+    assertThat(UnixGlob.matches("*a*b", "CaCb", null)).isTrue();
   }
 
   @Test
@@ -310,20 +345,14 @@ public class GlobTest {
   }
 
   @Test
-  public void testMultiplePatternsWithExcludes() throws Exception {
-    assertGlobWithExcludesMatches(Lists.newArrayList("foo", "foo?"),
-        Lists.newArrayList("fool"), "foo", "food");
-  }
-
-  @Test
   public void testMatcherMethodRecursiveBelowDir() throws Exception {
     FileSystemUtils.createEmptyFile(tmpPath.getRelative("foo/file"));
     String pattern = "foo/**/*";
-    assertTrue(UnixGlob.matches(pattern, "foo/bar"));
-    assertTrue(UnixGlob.matches(pattern, "foo/bar/baz"));
-    assertFalse(UnixGlob.matches(pattern, "foo"));
-    assertFalse(UnixGlob.matches(pattern, "foob"));
-    assertTrue(UnixGlob.matches("**/foo", "foo"));
+    assertThat(UnixGlob.matches(pattern, "foo/bar")).isTrue();
+    assertThat(UnixGlob.matches(pattern, "foo/bar/baz")).isTrue();
+    assertThat(UnixGlob.matches(pattern, "foo")).isFalse();
+    assertThat(UnixGlob.matches(pattern, "foob")).isFalse();
+    assertThat(UnixGlob.matches("**/foo", "foo")).isTrue();
   }
 
   @Test
@@ -343,29 +372,12 @@ public class GlobTest {
         new UnixGlob.Builder(tmpPath).addPatterns(patterns).globInterruptible());
   }
 
-  /**
-   * Tests that a glob returns files in sorted order.
-   */
-  @Test
-  public void testGlobEntriesAreSorted() throws Exception {
-    Collection<Path> directoryEntries = tmpPath.getDirectoryEntries();
-    List<Path> globResult = new UnixGlob.Builder(tmpPath)
-        .addPattern("*")
-        .setExcludeDirectories(false)
-        .globInterruptible();
-    assertThat(Ordering.natural().sortedCopy(directoryEntries)).containsExactlyElementsIn(
-        globResult).inOrder();
-  }
-
   private void assertIllegalPattern(String pattern) throws Exception {
-    try {
-      new UnixGlob.Builder(tmpPath)
-          .addPattern(pattern)
-          .globInterruptible();
-      fail();
-    } catch (IllegalArgumentException e) {
-      MoreAsserts.assertContainsRegex("in glob pattern", e.getMessage());
-    }
+    UnixGlob.BadPattern e =
+        assertThrows(
+            UnixGlob.BadPattern.class,
+            () -> new UnixGlob.Builder(tmpPath).addPattern(pattern).globInterruptible());
+    assertThat(e).hasMessageThat().containsMatch("in glob pattern");
   }
 
   @Test
@@ -373,21 +385,30 @@ public class GlobTest {
     for (String dir : ImmutableList.of(".hidden", "..also.hidden", "not.hidden")) {
       FileSystemUtils.createDirectoryAndParents(tmpPath.getRelative(dir));
     }
+
     // Note that these are not in the result: ".", ".."
     assertGlobMatches("*", "not.hidden", "foo", "fool", "food", ".hidden", "..also.hidden");
+
     assertGlobMatches("*.hidden", "not.hidden");
+
+    assertGlobMatches(".*also*", "..also.hidden");
   }
 
   @Test
   public void testIOException() throws Exception {
     throwOnReaddir = fs.getPath("/throw_on_readdir");
     throwOnReaddir.createDirectory();
-    try {
-      new UnixGlob.Builder(throwOnReaddir).addPattern("**").glob();
-      fail();
-    } catch (IOException e) {
-      // Expected.
-    }
+    assertThrows(
+        IOException.class, () -> new UnixGlob.Builder(throwOnReaddir).addPattern("**").glob());
+  }
+
+  @Test
+  public void testFastFailureithInterrupt() throws Exception {
+    Thread.currentThread().interrupt();
+    throwOnStat = tmpPath;
+    FileNotFoundException e =
+        assertThrows(FileNotFoundException.class, () -> new UnixGlob.Builder(tmpPath).glob());
+    assertThat(e).hasMessageThat().contains("globtmp");
   }
 
   @Test
@@ -404,32 +425,23 @@ public class GlobTest {
           }
         };
 
-    Future<?> globResult = null;
-    try {
-      globResult =
-          new UnixGlob.Builder(tmpPath)
-              .addPattern("**")
-              .setDirectoryFilter(interrupterPredicate)
-              .setThreadPool(executor)
-              .globAsync(true);
-      globResult.get();
-      fail(); // Should have received InterruptedException
-    } catch (InterruptedException e) {
-      // good
-    }
+    Future<?> globResult =
+        new UnixGlob.Builder(tmpPath)
+            .addPattern("**")
+            .setDirectoryFilter(interrupterPredicate)
+            .setExecutor(executor)
+            .globAsync();
+    assertThrows(InterruptedException.class, () -> globResult.get());
 
     globResult.cancel(true);
-    try {
-      Uninterruptibles.getUninterruptibly(globResult);
-      fail();
-    } catch (CancellationException e) {
-      // Expected.
-    }
+    assertThrows(
+        CancellationException.class, () -> Uninterruptibles.getUninterruptibly(globResult));
 
     Thread.interrupted();
-    assertFalse(executor.isShutdown());
+    assertThat(executor.isShutdown()).isFalse();
     executor.shutdown();
-    assertTrue(executor.awaitTermination(TestUtils.WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+    assertThat(executor.awaitTermination(TestUtils.WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+        .isTrue();
   }
 
   @Test
@@ -448,19 +460,62 @@ public class GlobTest {
       }
     };
 
-    List<Path> result = new UnixGlob.Builder(tmpPath)
-        .addPatterns("**", "*")
-        .setDirectoryFilter(interrupterPredicate).setThreadPool(executor).glob();
+    List<Path> result =
+        new UnixGlob.Builder(tmpPath)
+            .addPatterns("**", "*")
+            .setDirectoryFilter(interrupterPredicate)
+            .setExecutor(executor)
+            .glob();
 
     // In the non-interruptible case, the interrupt bit should be set, but the
     // glob should return the correct set of full results.
-    assertTrue(Thread.interrupted());
-    MoreAsserts.assertSameContents(resolvePaths(".", "foo", "foo/bar", "foo/bar/wiz",
-        "foo/bar/wiz/file", "foo/barnacle", "foo/barnacle/wiz", "food", "food/barnacle",
-        "food/barnacle/wiz", "fool", "fool/barnacle", "fool/barnacle/wiz"), result);
+    assertThat(Thread.interrupted()).isTrue();
+    assertThat(result)
+        .containsExactlyElementsIn(
+            resolvePaths(
+                ".",
+                "foo",
+                "foo/bar",
+                "foo/bar/wiz",
+                "foo/bar/wiz/file",
+                "foo/barnacle",
+                "foo/barnacle/wiz",
+                "food",
+                "food/barnacle",
+                "food/barnacle/wiz",
+                "fool",
+                "fool/barnacle",
+                "fool/barnacle/wiz"));
 
-    assertFalse(executor.isShutdown());
+    assertThat(executor.isShutdown()).isFalse();
     executor.shutdown();
-    assertTrue(executor.awaitTermination(TestUtils.WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+    assertThat(executor.awaitTermination(TestUtils.WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+        .isTrue();
+  }
+
+  private static Collection<String> removeExcludes(ImmutableList<String> paths, String... excludes)
+      throws UnixGlob.BadPattern {
+    HashSet<String> pathSet = new HashSet<>(paths);
+    UnixGlob.removeExcludes(pathSet, ImmutableList.copyOf(excludes));
+    return pathSet;
+  }
+
+  @Test
+  public void testExcludeFiltering() throws UnixGlob.BadPattern {
+    ImmutableList<String> paths = ImmutableList.of("a/A.java", "a/B.java", "a/b/C.java", "c.cc");
+    assertThat(removeExcludes(paths, "**/*.java")).containsExactly("c.cc");
+    assertThat(removeExcludes(paths, "a/**/*.java")).containsExactly("c.cc");
+    assertThat(removeExcludes(paths, "**/nomatch.*")).containsAtLeastElementsIn(paths);
+    assertThat(removeExcludes(paths, "a/A.java")).containsExactly("a/B.java", "a/b/C.java", "c.cc");
+    assertThat(removeExcludes(paths, "a/?.java")).containsExactly("a/b/C.java", "c.cc");
+    assertThat(removeExcludes(paths, "a/*/C.java")).containsExactly("a/A.java", "a/B.java", "c.cc");
+    assertThat(removeExcludes(paths, "**")).isEmpty();
+    assertThat(removeExcludes(paths, "**/**")).isEmpty();
+
+    // Test filenames that look like code patterns.
+    paths = ImmutableList.of("a/A.java", "a/B.java", "a/b/*.java", "a/b/C.java", "c.cc");
+    assertThat(removeExcludes(paths, "**/*.java")).containsExactly("c.cc");
+    assertThat(removeExcludes(paths, "**/A.java", "**/B.java", "**/C.java"))
+        .containsExactly("a/b/*.java", "c.cc");
   }
 }

@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2018 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,27 +14,124 @@
 
 package com.google.devtools.build.lib.analysis;
 
-import com.google.devtools.build.lib.syntax.Label;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.MoreObjects;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.actions.ActionLookupKey;
+import com.google.devtools.build.lib.buildeventstream.BuildEvent;
+import com.google.devtools.build.lib.buildeventstream.BuildEventContext;
+import com.google.devtools.build.lib.buildeventstream.BuildEventIdUtil;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
+import com.google.devtools.build.lib.buildeventstream.GenericBuildEvent;
+import com.google.devtools.build.lib.buildeventstream.NullConfiguration;
+import com.google.devtools.build.lib.causes.Cause;
+import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.skyframe.AspectValueKey;
+import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
+import java.util.Collection;
+import javax.annotation.Nullable;
 
 /**
- * This event is fired during the build, when it becomes known that the analysis
- * of a target cannot be completed because of an error in one of its
- * dependencies.
+ * This event is fired during the build, when it becomes known that the analysis of a top-level
+ * target cannot be completed because of an error in one of its dependencies.
  */
-public class AnalysisFailureEvent {
-  private final LabelAndConfiguration failedTarget;
-  private final Label failureReason;
+public class AnalysisFailureEvent implements BuildEvent {
+  @Nullable private final AspectValueKey failedAspect;
+  private final ConfiguredTargetKey failedTarget;
+  private final BuildEventId configuration;
+  private final NestedSet<Cause> rootCauses;
 
-  public AnalysisFailureEvent(LabelAndConfiguration failedTarget, Label failureReason) {
-    this.failedTarget = failedTarget;
-    this.failureReason = failureReason;
+  public AnalysisFailureEvent(
+      ActionLookupKey failedTarget, BuildEventId configuration, NestedSet<Cause> rootCauses) {
+    Preconditions.checkArgument(
+        failedTarget instanceof ConfiguredTargetKey || failedTarget instanceof AspectValueKey);
+    if (failedTarget instanceof ConfiguredTargetKey) {
+      this.failedAspect = null;
+      this.failedTarget = (ConfiguredTargetKey) failedTarget;
+    } else {
+      this.failedAspect = (AspectValueKey) failedTarget;
+      this.failedTarget = failedAspect.getBaseConfiguredTargetKey();
+    }
+    if (configuration != null) {
+      this.configuration = configuration;
+    } else {
+      this.configuration = NullConfiguration.INSTANCE.getEventId();
+    }
+    this.rootCauses = rootCauses;
   }
 
-  public LabelAndConfiguration getFailedTarget() {
+  public AnalysisFailureEvent(
+      AspectValueKey failedAspect, BuildEventId configuration, NestedSet<Cause> rootCauses) {
+    this.failedAspect = failedAspect;
+    this.failedTarget = failedAspect.getBaseConfiguredTargetKey();
+    if (configuration != null) {
+      this.configuration = configuration;
+    } else {
+      this.configuration = NullConfiguration.INSTANCE.getEventId();
+    }
+    this.rootCauses = rootCauses;
+  }
+
+  @Override
+  public String toString() {
+    return MoreObjects.toStringHelper(this)
+        .add("failedAspect", failedAspect)
+        .add("failedTarget", failedTarget)
+        .add("configuration", configuration)
+        .add("legacyFailureReason", getLegacyFailureReason())
+        .toString();
+  }
+
+  public ConfiguredTargetKey getFailedTarget() {
     return failedTarget;
   }
 
-  public Label getFailureReason() {
-    return failureReason;
+  @VisibleForTesting
+  BuildEventId getConfigurationId() {
+    return configuration;
+  }
+
+  /**
+   * Returns the label of a single root cause. Use {@link #getRootCauses} to report all root causes.
+   */
+  @Nullable public Label getLegacyFailureReason() {
+    if (rootCauses.isEmpty()) {
+      return null;
+    }
+    return rootCauses.toList().get(0).getLabel();
+  }
+
+  public NestedSet<Cause> getRootCauses() {
+    return rootCauses;
+  }
+
+  @Override
+  public BuildEventId getEventId() {
+    if (failedAspect == null) {
+      return BuildEventIdUtil.targetCompleted(failedTarget.getLabel(), configuration);
+    } else {
+      return BuildEventIdUtil.aspectCompleted(
+          failedTarget.getLabel(), configuration, failedAspect.getAspectName());
+    }
+  }
+
+  @Override
+  public Collection<BuildEventId> getChildrenEvents() {
+    return ImmutableList.copyOf(
+        Iterables.transform(rootCauses.toList(), cause -> cause.getIdProto()));
+  }
+
+  @Override
+  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventContext converters) {
+    return GenericBuildEvent.protoChaining(this)
+        .setAborted(
+            BuildEventStreamProtos.Aborted.newBuilder()
+                .setReason(BuildEventStreamProtos.Aborted.AbortReason.ANALYSIS_FAILURE)
+                .build())
+        .build();
   }
 }

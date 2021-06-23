@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,10 +14,13 @@
 
 package com.google.devtools.build.lib.runtime;
 
+import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
+import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.common.options.OptionsParser;
+import com.google.devtools.common.options.OptionsParsingException;
 import java.util.List;
 
 /**
@@ -34,13 +37,17 @@ public interface ProjectFile {
    * <p>Note in particular that packages may be moved between different package path entries, which
    * should lead to cache invalidation.
    */
-  public interface Provider {
+  interface Provider {
     /**
      * Returns an (optionally cached) project file instance. If there is no such file, or if the
      * file cannot be parsed, then it throws an exception.
      */
-    ProjectFile getProjectFile(List<Path> packagePath, PathFragment path)
-        throws AbruptExitException;
+    ProjectFile getProjectFile(
+        Path workingDirectory,
+        List<Root> packagePath,
+        PathFragment path,
+        OptionsParser optionsParser)
+        throws OptionsParsingException, InterruptedException;
   }
 
   /**
@@ -53,7 +60,8 @@ public interface ProjectFile {
    * A list of strings that are parsed into the options for the command.
    *
    * @param command An action from the command line, e.g. "build" or "test".
-   * @throws UnsupportedOperationException if an unknown command is passed.
+   * @throws AbruptExitException if an unknown command is passed.
    */
-  List<String> getCommandLineFor(String command);
+  List<String> getCommandLineFor(String command, EventHandler eventHandler)
+      throws AbruptExitException;
 }

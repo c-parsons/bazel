@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,80 +13,118 @@
 // limitations under the License.
 package com.google.devtools.build.lib.actions;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import com.google.devtools.build.lib.causes.ActionFailed;
+import com.google.devtools.build.lib.causes.Cause;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.syntax.Label;
+import com.google.devtools.build.lib.skyframe.DetailedException;
+import com.google.devtools.build.lib.util.DetailedExitCode;
+import com.google.devtools.build.lib.util.ExitCode;
+import net.starlark.java.syntax.Location;
 
 /**
  * This exception gets thrown if {@link Action#execute(ActionExecutionContext)} is unsuccessful.
  * Typically these are re-raised ExecException throwables.
  */
 @ThreadSafe
-public class ActionExecutionException extends Exception {
+public class ActionExecutionException extends Exception implements DetailedException {
 
-  private final Action action;
-  private final NestedSet<Label> rootCauses;
+  private final ActionAnalysisMetadata action;
+  private final NestedSet<Cause> rootCauses;
   private final boolean catastrophe;
+  private final DetailedExitCode detailedExitCode;
 
-  public ActionExecutionException(Throwable cause, Action action, boolean catastrophe) {
+  public ActionExecutionException(
+      Throwable cause,
+      ActionAnalysisMetadata action,
+      boolean catastrophe,
+      DetailedExitCode detailedExitCode) {
     super(cause.getMessage(), cause);
     this.action = action;
-    this.rootCauses = rootCausesFromAction(action);
+    this.detailedExitCode = detailedExitCode;
+    this.rootCauses = rootCausesFromAction(action, detailedExitCode);
     this.catastrophe = catastrophe;
   }
 
-  public ActionExecutionException(String message,
-                                  Throwable cause, Action action, boolean catastrophe) {
-    super(message + ": " + cause.getMessage(), cause);
+  public ActionExecutionException(
+      String message,
+      Throwable cause,
+      ActionAnalysisMetadata action,
+      boolean catastrophe,
+      DetailedExitCode detailedExitCode) {
+    super(message, cause);
     this.action = action;
-    this.rootCauses = rootCausesFromAction(action);
     this.catastrophe = catastrophe;
+    this.detailedExitCode = checkNotNull(detailedExitCode);
+    this.rootCauses = rootCausesFromAction(action, detailedExitCode);
   }
 
-  public ActionExecutionException(String message, Action action, boolean catastrophe) {
+  public ActionExecutionException(
+      String message,
+      ActionAnalysisMetadata action,
+      boolean catastrophe,
+      DetailedExitCode detailedExitCode) {
     super(message);
     this.action = action;
-    this.rootCauses = rootCausesFromAction(action);
     this.catastrophe = catastrophe;
+    this.detailedExitCode = detailedExitCode;
+    this.rootCauses = rootCausesFromAction(action, this.detailedExitCode);
   }
 
-  public ActionExecutionException(String message, Action action,
-      NestedSet<Label> rootCauses, boolean catastrophe) {
+  public ActionExecutionException(
+      String message,
+      ActionAnalysisMetadata action,
+      NestedSet<Cause> rootCauses,
+      boolean catastrophe,
+      DetailedExitCode detailedExitCode) {
     super(message);
     this.action = action;
     this.rootCauses = rootCauses;
     this.catastrophe = catastrophe;
+    this.detailedExitCode = detailedExitCode;
   }
 
-  public ActionExecutionException(String message, Throwable cause, Action action,
-      NestedSet<Label> rootCauses, boolean catastrophe) {
+  public ActionExecutionException(
+      String message,
+      Throwable cause,
+      ActionAnalysisMetadata action,
+      NestedSet<Cause> rootCauses,
+      boolean catastrophe,
+      DetailedExitCode detailedExitCode) {
     super(message, cause);
     this.action = action;
     this.rootCauses = rootCauses;
     this.catastrophe = catastrophe;
+    this.detailedExitCode = checkNotNull(detailedExitCode);
   }
 
-  static NestedSet<Label> rootCausesFromAction(Action action) {
+  private static NestedSet<Cause> rootCausesFromAction(
+      ActionAnalysisMetadata action, DetailedExitCode detailedExitCode) {
     return action == null || action.getOwner() == null || action.getOwner().getLabel() == null
-        ? NestedSetBuilder.<Label>emptySet(Order.STABLE_ORDER)
-        : NestedSetBuilder.create(Order.STABLE_ORDER, action.getOwner().getLabel());
+        ? NestedSetBuilder.emptySet(Order.STABLE_ORDER)
+        : NestedSetBuilder.create(
+            Order.STABLE_ORDER,
+            new ActionFailed(
+                action.getPrimaryOutput().getExecPath(),
+                action.getOwner().getLabel(),
+                action.getOwner().getConfigurationChecksum(),
+                detailedExitCode));
   }
 
-  /**
-   * Returns the action that failed.
-   */
-  public Action getAction() {
+  /** Returns the action that failed. */
+  public ActionAnalysisMetadata getAction() {
     return action;
   }
 
   /**
-   * Return the root causes that should be reported. Usually the owner of the action, but it can
-   * be the label of a missing artifact.
+   * Return the root causes that should be reported. Usually the owner of the action, but it can be
+   * the label of a missing artifact.
    */
-  public NestedSet<Label> getRootCauses() {
+  public NestedSet<Cause> getRootCauses() {
     return rootCauses;
   }
 
@@ -102,6 +140,19 @@ public class ActionExecutionException extends Exception {
    */
   public boolean isCatastrophe() {
     return catastrophe;
+  }
+
+  /**
+   * Returns the exit code to return from this Bazel invocation because of this action execution
+   * failure.
+   */
+  public ExitCode getExitCode() {
+    return detailedExitCode.getExitCode();
+  }
+
+  @Override
+  public DetailedExitCode getDetailedExitCode() {
+    return detailedExitCode;
   }
 
   /**

@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,45 +14,7 @@
 
 package com.google.devtools.build.lib.runtime;
 
-import com.google.devtools.build.lib.vfs.Path;
-
-import java.util.Map;
-import java.util.UUID;
-
-/**
- * This event is fired when the Blaze command is started (clean, build, test,
- * etc.).
- */
-public class CommandStartEvent extends CommandEvent {
-  private final String commandName;
-  private final UUID commandId;
-  private final Map<String, String> clientEnv;
-  private final Path workingDirectory;
-
-  /**
-   * @param commandName the name of the command
-   */
-  public CommandStartEvent(String commandName, UUID commandId, Map<String, String> clientEnv,
-      Path workingDirectory) {
-    this.commandName = commandName;
-    this.commandId = commandId;
-    this.clientEnv = clientEnv;
-    this.workingDirectory = workingDirectory;
-  }
-
-  public String getCommandName() {
-    return commandName;
-  }
-
-  public UUID getCommandId() {
-    return commandId;
-  }
-
-  public Map<String, String> getClientEnv() {
-    return clientEnv;
-  }
-
-  public Path getWorkingDirectory() {
-    return workingDirectory;
-  }
+/** This event is fired when the Blaze command is started (clean, build, test, etc.). */
+public class CommandStartEvent {
+  public CommandStartEvent() {}
 }

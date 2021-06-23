@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,28 +14,28 @@
 
 package com.google.devtools.build.lib.actions;
 
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+
 /**
- * An ExecException that is related to the failure of an Action and therefore
- * very likely the user's fault.
+ * An ExecException that is related to the failure of an Action and therefore very likely the user's
+ * fault.
  */
 public class UserExecException extends ExecException {
 
-  public UserExecException(String message) {
-    super(message);
+  private final FailureDetail failureDetail;
+
+  public UserExecException(FailureDetail failureDetail) {
+    super(failureDetail.getMessage());
+    this.failureDetail = failureDetail;
   }
 
-  public UserExecException(String message, Throwable cause) {
-    super(message, cause);
+  public UserExecException(Throwable cause, FailureDetail failureDetail) {
+    super(failureDetail.getMessage(), cause);
+    this.failureDetail = failureDetail;
   }
 
   @Override
-  public ActionExecutionException toActionExecutionException(String messagePrefix,
-        boolean verboseFailures, Action action) {
-    String message = messagePrefix + " failed: " + getMessage();
-    if (verboseFailures) {
-      return new ActionExecutionException(message, this, action, isCatastrophic());
-    } else {
-      return new ActionExecutionException(message, action, isCatastrophic());
-    }
+  protected FailureDetail getFailureDetail(String message) {
+    return failureDetail.toBuilder().setMessage(message).build();
   }
 }

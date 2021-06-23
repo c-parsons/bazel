@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,6 @@ package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.FilesetOutputSymlink;
-import com.google.devtools.build.lib.actions.FilesetTraversalParams;
-import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
 /** Output symlinks produced by a whole FilesetEntry or by a single file in FilesetEntry.files. */
@@ -41,10 +39,6 @@ public final class FilesetEntryValue implements SkyValue {
   /** Returns the list of output symlinks. */
   public ImmutableSet<FilesetOutputSymlink> getSymlinks() {
     return symlinks;
-  }
-
-  public static SkyKey key(FilesetTraversalParams params) {
-    return new SkyKey(SkyFunctions.FILESET_ENTRY, params);
   }
 
   @Override

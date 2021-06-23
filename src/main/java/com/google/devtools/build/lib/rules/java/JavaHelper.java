@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,72 +13,78 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.java;
 
+
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.shell.ShellUtils;
-
+import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Utility methods for use by Java-related parts of Bazel.
- */
+/** Utility methods for use by Java-related parts of Bazel. */
 // TODO(bazel-team): Merge with JavaUtil.
 public abstract class JavaHelper {
 
   private JavaHelper() {}
 
   /**
-   * Returns the java launcher implementation for the given target, if any.
-   * A null return value means "use the JDK launcher".
+   * Returns the java launcher implementation for the given target, if any. A null return value
+   * means "use the JDK launcher".
    */
-  public static TransitiveInfoCollection launcherForTarget(JavaSemantics semantics,
-      RuleContext ruleContext) {
-    String launcher = filterLauncherForTarget(semantics, ruleContext);
-    return (launcher == null) ? null : ruleContext.getPrerequisite(launcher, Mode.TARGET);
+  public static TransitiveInfoCollection launcherForTarget(
+      JavaSemantics semantics, RuleContext ruleContext) {
+    String launcher = filterLauncherForTarget(ruleContext);
+    return (launcher == null) ? null : ruleContext.getPrerequisite(launcher);
   }
 
   /**
-   * Returns the java launcher artifact for the given target, if any.
-   * A null return value means "use the JDK launcher".
+   * Returns the java launcher artifact for the given target, if any. A null return value means "use
+   * the JDK launcher".
    */
-  public static Artifact launcherArtifactForTarget(JavaSemantics semantics,
-      RuleContext ruleContext) {
-    String launcher = filterLauncherForTarget(semantics, ruleContext);
-    return (launcher == null) ? null : ruleContext.getPrerequisiteArtifact(launcher, Mode.TARGET);
+  public static Artifact launcherArtifactForTarget(
+      JavaSemantics semantics, RuleContext ruleContext) {
+    String launcher = filterLauncherForTarget(ruleContext);
+    return (launcher == null) ? null : ruleContext.getPrerequisiteArtifact(launcher);
   }
 
   /**
-   * Control structure abstraction for safely extracting a prereq from the launcher attribute
-   * or --java_launcher flag.
+   * Control structure abstraction for safely extracting a prereq from the launcher attribute or
+   * {@code --java_launcher} flag.
+   *
+   * <p>Returns {@code null} if either {@code create_executable} or {@code use_launcher} are
+   * disabled.
    */
-  private static String filterLauncherForTarget(JavaSemantics semantics, RuleContext ruleContext) {
+  private static String filterLauncherForTarget(RuleContext ruleContext) {
+    // create_executable=0 disables the launcher
+    if (ruleContext.getRule().isAttrDefined("create_executable", Type.BOOLEAN)
+        && !ruleContext.attributes().get("create_executable", Type.BOOLEAN)) {
+      return null;
+    }
+    // use_launcher=False disables the launcher
+    if (ruleContext.getRule().isAttrDefined("use_launcher", Type.BOOLEAN)
+        && !ruleContext.attributes().get("use_launcher", Type.BOOLEAN)) {
+      return null;
+    }
     // BUILD rule "launcher" attribute
-    if (ruleContext.getRule().isAttrDefined("launcher", Type.LABEL)
-        && ruleContext.attributes().get("launcher", Type.LABEL) != null) {
-      if (ruleContext.attributes().get("launcher", Type.LABEL)
-          .equals(JavaSemantics.JDK_LAUNCHER_LABEL)) {
-        return null;
-      }
+    if (ruleContext.getRule().isAttrDefined("launcher", BuildType.LABEL)
+        && ruleContext.attributes().get("launcher", BuildType.LABEL) != null) {
       return "launcher";
     }
     // Blaze flag --java_launcher
     JavaConfiguration javaConfig = ruleContext.getFragment(JavaConfiguration.class);
-    if (ruleContext.getRule().isAttrDefined(":java_launcher", Type.LABEL)
-        && ((javaConfig.getJavaLauncherLabel() != null
-                && !javaConfig.getJavaLauncherLabel().equals(JavaSemantics.JDK_LAUNCHER_LABEL))
-            || semantics.forceUseJavaLauncherTarget(ruleContext))) {
+    if (ruleContext.getRule().isAttrDefined(":java_launcher", BuildType.LABEL)
+        && javaConfig.getJavaLauncherLabel() != null) {
       return ":java_launcher";
     }
     return null;
   }
 
   /**
-   * Javac options require special processing - People use them and expect the
-   * options to be tokenized.
+   * Javac options require special processing - People use them and expect the options to be
+   * tokenized.
    */
   public static List<String> tokenizeJavaOptions(Iterable<String> inOpts) {
     // Ideally, this would be in the options parser. Unfortunately,
@@ -91,7 +97,7 @@ public abstract class JavaHelper {
         ShellUtils.tokenize(result, current);
       } catch (ShellUtils.TokenizationException ex) {
         // Tokenization failed; this likely means that the user
-        // did not want tokenization to happen on his argument.
+        // did not want tokenization to happen on their argument.
         // (Any tokenization where we should produce an error
         // has already been done by the shell that invoked
         // blaze). Therefore, pass the argument through to
@@ -100,5 +106,37 @@ public abstract class JavaHelper {
       }
     }
     return result;
+  }
+
+  public static PathFragment getJavaResourcePath(
+      JavaSemantics semantics, RuleContext ruleContext, Artifact resource) {
+    boolean siblingRepositoryLayout = ruleContext.getConfiguration().isSiblingRepositoryLayout();
+    PathFragment resourcePath = resource.getOutputDirRelativePath(siblingRepositoryLayout);
+    PathFragment repoExecPath =
+        ruleContext
+            .getLabel()
+            .getRepository()
+            .getExecPath(siblingRepositoryLayout);
+    if (!repoExecPath.isEmpty() && resourcePath.startsWith(repoExecPath)) {
+      resourcePath = resourcePath.relativeTo(repoExecPath);
+    }
+
+    if (!ruleContext.attributes().has("resource_strip_prefix", Type.STRING)
+        || !ruleContext.attributes().isAttributeValueExplicitlySpecified("resource_strip_prefix")) {
+      return semantics.getDefaultJavaResourcePath(resourcePath);
+    }
+
+    PathFragment prefix =
+        PathFragment.create(ruleContext.attributes().get("resource_strip_prefix", Type.STRING));
+
+    if (!resourcePath.startsWith(prefix)) {
+      ruleContext.attributeError(
+          "resource_strip_prefix",
+          String.format(
+              "Resource file '%s' is not under the specified prefix to strip", resourcePath));
+      return resourcePath;
+    }
+
+    return resourcePath.relativeTo(prefix);
   }
 }

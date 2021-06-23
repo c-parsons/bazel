@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,14 +15,17 @@
 package com.google.devtools.build.lib.rules.objc;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import net.starlark.java.annot.StarlarkMethod;
+import net.starlark.java.eval.StarlarkValue;
 
 /**
  * Represents the name of an SDK framework.
- * <p>
- * Besides being a glorified String, this class prevents you from adding framework names to an
+ *
+ * <p>Besides being a glorified String, this class prevents you from adding framework names to an
  * argument list without explicitly specifying how to prefix them.
  */
-final class SdkFramework extends Value<SdkFramework> {
+final class SdkFramework extends Value<SdkFramework> implements StarlarkValue {
   private final String name;
 
   public SdkFramework(String name) {
@@ -30,16 +33,15 @@ final class SdkFramework extends Value<SdkFramework> {
     this.name = name;
   }
 
+  @StarlarkMethod(name = "name", documented = false, structField = true)
   public String getName() {
     return name;
   }
 
-  /**
-   * Returns an iterable which contains the name of each given framework in the same order.
-   */
-  static Iterable<String> names(Iterable<SdkFramework> frameworks) {
+  /** Returns an iterable which contains the name of each given framework in the same order. */
+  static ImmutableList<String> names(NestedSet<SdkFramework> frameworks) {
     ImmutableList.Builder<String> result = new ImmutableList.Builder<>();
-    for (SdkFramework framework : frameworks) {
+    for (SdkFramework framework : frameworks.toList()) {
       result.add(framework.getName());
     }
     return result.build();

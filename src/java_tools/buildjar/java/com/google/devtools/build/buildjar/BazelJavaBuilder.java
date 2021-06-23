@@ -1,4 +1,4 @@
-// Copyright 2007-2014 Google Inc. All rights reserved.
+// Copyright 2016 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,121 +14,115 @@
 
 package com.google.devtools.build.buildjar;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.buildjar.javac.BlazeJavacResult;
+import com.google.devtools.build.buildjar.javac.BlazeJavacResult.Status;
+import com.google.devtools.build.buildjar.javac.FormattedDiagnostic;
 import com.google.devtools.build.buildjar.javac.JavacOptions;
 import com.google.devtools.build.buildjar.javac.plugins.BlazeJavaCompilerPlugin;
 import com.google.devtools.build.buildjar.javac.plugins.dependency.DependencyModule;
 import com.google.devtools.build.buildjar.javac.plugins.errorprone.ErrorPronePlugin;
-import com.google.devtools.build.buildjar.javac.plugins.filemanager.FileManagerInitializationPlugin;
-import com.google.devtools.build.lib.worker.WorkerProtocol.WorkRequest;
-import com.google.devtools.build.lib.worker.WorkerProtocol.WorkResponse;
-
-import java.io.ByteArrayOutputStream;
+import com.google.devtools.build.lib.worker.ProtoWorkerMessageProcessor;
+import com.google.devtools.build.lib.worker.WorkRequestHandler;
+import com.google.devtools.build.lib.worker.WorkRequestHandler.WorkRequestHandlerBuilder;
 import java.io.IOException;
-import java.io.PrintStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.io.Writer;
+import java.nio.charset.Charset;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * The JavaBuilder main called by bazel.
- */
-public abstract class BazelJavaBuilder {
+/** The JavaBuilder main called by bazel. */
+public class BazelJavaBuilder {
 
   private static final String CMDNAME = "BazelJavaBuilder";
 
-  /**
-   * The main method of the BazelJavaBuilder.
-   */
+  /** The main method of the BazelJavaBuilder. */
   public static void main(String[] args) {
+    BazelJavaBuilder builder = new BazelJavaBuilder();
     if (args.length == 1 && args[0].equals("--persistent_worker")) {
-      System.exit(runPersistentWorker());
-    } else {
-      // This is a single invocation of JavaBuilder that exits after it processed the request.
-      System.exit(processRequest(Arrays.asList(args)));
-    }
-  }
-
-  private static int runPersistentWorker() {
-    PrintStream originalStdOut = System.out;
-    PrintStream originalStdErr = System.err;
-
-    while (true) {
+      WorkRequestHandler workerHandler =
+          new WorkRequestHandlerBuilder(
+                  builder::parseAndBuild,
+                  System.err,
+                  new ProtoWorkerMessageProcessor(System.in, System.out))
+              .setCpuUsageBeforeGc(Duration.ofSeconds(10))
+              .build();
       try {
-        WorkRequest request = WorkRequest.parseDelimitedFrom(System.in);
-
-        if (request == null) {
-          break;
-        }
-
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        PrintStream ps = new PrintStream(baos, true);
-        // Make sure that we exit nonzero in case an exception occurs during processRequest.
-        int exitCode = 1;
-        // TODO(philwo) - change this so that a PrintWriter can be passed in and will be used
-        // instead of redirect stdout / stderr.
-        System.setOut(ps);
-        System.setErr(ps);
-        try {
-          exitCode = processRequest(request.getArgumentsList());
-        } finally {
-          System.setOut(originalStdOut);
-          System.setErr(originalStdErr);
-        }
-
-        WorkResponse.newBuilder()
-            .setOutput(baos.toString())
-            .setExitCode(exitCode)
-            .build()
-            .writeDelimitedTo(System.out);
-        System.out.flush();
+        workerHandler.processRequests();
       } catch (IOException e) {
-        e.printStackTrace();
-        return 1;
-      } finally {
-        // JavaBuilder doesn't close certain file handles. We have to migrate to using the real
-        // Jsr199 API instead of just calling the Main method of Javac in order to fix this, for
-        // now let's just invoke GC.
-        System.gc();
+        System.err.println(e.getMessage());
+        System.exit(1);
       }
+    } else {
+      PrintWriter pw =
+          new PrintWriter(new OutputStreamWriter(System.err, Charset.defaultCharset()));
+      int returnCode;
+      try {
+        returnCode = builder.parseAndBuild(Arrays.asList(args), pw);
+      } finally {
+        pw.flush();
+      }
+      System.exit(returnCode);
     }
-
-    return 0;
   }
 
-  private static int processRequest(List<String> args) {
+  public int parseAndBuild(List<String> args, PrintWriter pw) {
     try {
       JavaLibraryBuildRequest build = parse(args);
-      AbstractJavaBuilder builder = build.getDependencyModule().reduceClasspath()
-          ? new ReducedClasspathJavaLibraryBuilder()
-          : new SimpleJavaLibraryBuilder();
-      builder.run(build, System.err);
-    } catch (JavacException | InvalidCommandLineException e) {
-      System.err.println(CMDNAME + " threw exception: " + e.getMessage());
+      try (SimpleJavaLibraryBuilder builder =
+          build.getDependencyModule().reduceClasspath()
+              ? new ReducedClasspathJavaLibraryBuilder()
+              : new SimpleJavaLibraryBuilder()) {
+
+        return build(builder, build, pw);
+      }
+    } catch (InvalidCommandLineException e) {
+      pw.println(CMDNAME + " threw exception: " + e.getMessage());
       return 1;
     } catch (Exception e) {
       e.printStackTrace();
       return 1;
     }
-    return 0;
   }
 
   /**
-   * Parses the list of arguments into a {@link JavaLibraryBuildRequest}. The returned
-   * {@link JavaLibraryBuildRequest} object can be then used to configure the compilation itself.
+   * Uses {@code builder} to build the target passed in {@code buildRequest}. All errors and
+   * diagnostics should be written to {@code err}.
+   *
+   * @return An error code, 0 is success, any other value is an error.
+   */
+  protected int build(
+      SimpleJavaLibraryBuilder builder, JavaLibraryBuildRequest buildRequest, Writer err)
+      throws Exception {
+    BlazeJavacResult result = builder.run(buildRequest);
+    if (result.status() == Status.REQUIRES_FALLBACK) {
+      return 0;
+    }
+    for (FormattedDiagnostic d : result.diagnostics()) {
+      err.write(d.getFormatted() + "\n");
+    }
+    err.write(result.output());
+    return result.isOk() ? 0 : 1;
+  }
+
+  /**
+   * Parses the list of arguments into a {@link JavaLibraryBuildRequest}. The returned {@link
+   * JavaLibraryBuildRequest} object can be then used to configure the compilation itself.
    *
    * @throws IOException if the argument list contains a file (with the @ prefix) and reading that
-   *         file failed
+   *     file failed
    * @throws InvalidCommandLineException on any command line error
    */
-  private static JavaLibraryBuildRequest parse(List<String> args) throws IOException,
-      InvalidCommandLineException {
-    ImmutableList<BlazeJavaCompilerPlugin> plugins =
-        ImmutableList.<BlazeJavaCompilerPlugin>of(
-            new FileManagerInitializationPlugin(),
-            new ErrorPronePlugin());
-    JavaLibraryBuildRequest build =
-        new JavaLibraryBuildRequest(args, plugins, new DependencyModule.Builder());
-    build.setJavacOpts(JavacOptions.normalizeOptions(build.getJavacOpts()));
-    return build;
+  @VisibleForTesting
+  public JavaLibraryBuildRequest parse(List<String> args)
+      throws IOException, InvalidCommandLineException {
+    OptionsParser optionsParser =
+        new OptionsParser(args, JavacOptions.createWithWarningsAsErrorsDefault(ImmutableList.of()));
+    ImmutableList<BlazeJavaCompilerPlugin> plugins = ImmutableList.of(new ErrorPronePlugin());
+    return new JavaLibraryBuildRequest(optionsParser, plugins, new DependencyModule.Builder());
   }
 }

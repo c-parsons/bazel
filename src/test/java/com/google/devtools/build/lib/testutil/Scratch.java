@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,22 +14,25 @@
 
 package com.google.devtools.build.lib.testutil;
 
-import com.google.devtools.build.lib.util.BlazeClock;
+import com.google.common.io.ByteStreams;
+import com.google.devtools.build.lib.clock.BlazeClock;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
-
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.Collection;
 
 /**
  * Allow tests to easily manage scratch files in a FileSystem.
  */
 public final class Scratch {
-  
+
   private static final Charset DEFAULT_CHARSET = StandardCharsets.ISO_8859_1;
 
   private final FileSystem fileSystem;
@@ -39,14 +42,14 @@ public final class Scratch {
    * Create a new ScratchFileSystem using the {@link InMemoryFileSystem}
    */
   public Scratch() {
-    this(new InMemoryFileSystem(BlazeClock.instance()), "/");
+    this(new InMemoryFileSystem(BlazeClock.instance(), DigestHashFunction.SHA256), "/");
   }
 
   /**
    * Create a new ScratchFileSystem using the {@link InMemoryFileSystem}
    */
   public Scratch(String workingDir) {
-    this(new InMemoryFileSystem(BlazeClock.instance()), workingDir);
+    this(new InMemoryFileSystem(BlazeClock.instance(), DigestHashFunction.SHA256), workingDir);
   }
 
   /**
@@ -118,17 +121,64 @@ public final class Scratch {
   public Path file(String pathName, String... lines) throws IOException {
     return file(pathName, DEFAULT_CHARSET, lines);
   }
-  
+
   /**
-   * Create a scratch file in the scratch filesystem, with the given pathName,
-   * consisting of a set of lines. The method returns a Path instance for the
-   * scratch file.
+   * Create a scratch file in the scratch filesystem, with the given pathName, consisting of a set
+   * of lines. The method returns a Path instance for the scratch file.
    */
   public Path file(String pathName, Charset charset, String... lines) throws IOException {
     Path file = newFile(pathName);
     FileSystemUtils.writeContent(file, charset, linesAsString(lines));
     file.setLastModifiedTime(-1L);
     return file;
+  }
+
+  /**
+   * Create a scratch file in the given filesystem, with the given pathName, consisting of a set of
+   * lines. The method returns a Path instance for the scratch file.
+   */
+  public Path file(String pathName, byte[] content) throws IOException {
+    Path file = newFile(pathName);
+    FileSystemUtils.writeContent(file, content);
+    return file;
+  }
+
+  public String readFile(String pathName) throws IOException {
+    try (InputStream in = resolve(pathName).getInputStream()) {
+      return new String(ByteStreams.toByteArray(in), DEFAULT_CHARSET);
+    }
+  }
+
+  /** Like {@code scratch.file}, but the lines are added to the end if the file already exists. */
+  public Path appendFile(String pathName, Collection<String> lines) throws IOException {
+    return appendFile(pathName, lines.toArray(new String[lines.size()]));
+  }
+
+  /** Like {@code scratch.file}, but the lines are added to the end if the file already exists. */
+  public Path appendFile(String pathName, String... lines) throws IOException {
+    return appendFile(pathName, DEFAULT_CHARSET, lines);
+  }
+
+  /** Like {@code scratch.file}, but the lines are added to the end if the file already exists. */
+  public Path appendFile(String pathName, Charset charset, String... lines) throws IOException {
+    Path path = resolve(pathName);
+
+    StringBuilder content = new StringBuilder();
+    if (path.exists()) {
+      content.append(readFile(pathName));
+      content.append("\n");
+    }
+    content.append(linesAsString(lines));
+
+    return overwriteFile(pathName, content.toString());
+  }
+
+  /**
+   * Like {@code scratch.file}, but the file is first deleted if it already
+   * exists.
+   */
+  public Path overwriteFile(String pathName, Collection<String> lines)  throws IOException {
+    return overwriteFile(pathName, lines.toArray(new String[lines.size()]));
   }
 
   /**
@@ -159,17 +209,6 @@ public final class Scratch {
     return resolve(pathName).delete();
   }
 
-  /**
-   * Create a scratch file in the given filesystem, with the given pathName,
-   * consisting of a set of lines. The method returns a Path instance for the
-   * scratch file.
-   */
-  public Path file(String pathName, byte[] content) throws IOException {
-    Path file = newFile(pathName);
-    FileSystemUtils.writeContent(file, content);
-    return file;
-  }
-
   /** Creates a new scratch file, ensuring parents exist. */
   private Path newFile(String pathName) throws IOException {
     Path file = resolve(pathName);
@@ -195,5 +234,10 @@ public final class Scratch {
       builder.append('\n');
     }
     return builder.toString();
+  }
+
+  public void copyFile(String sourceFile, String destFile) throws IOException {
+    String contents = readFile(sourceFile);
+    overwriteFile(destFile, contents);
   }
 }

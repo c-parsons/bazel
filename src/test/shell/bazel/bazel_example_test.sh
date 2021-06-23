@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright 2015 Google Inc. All rights reserved.
+# Copyright 2015 The Bazel Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,13 +16,42 @@
 #
 # Tests the examples provided in Bazel
 #
+# --- begin runfiles.bash initialization ---
+set -euo pipefail
+if [[ ! -d "${RUNFILES_DIR:-/dev/null}" && ! -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+    if [[ -f "$0.runfiles_manifest" ]]; then
+      export RUNFILES_MANIFEST_FILE="$0.runfiles_manifest"
+    elif [[ -f "$0.runfiles/MANIFEST" ]]; then
+      export RUNFILES_MANIFEST_FILE="$0.runfiles/MANIFEST"
+    elif [[ -f "$0.runfiles/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+      export RUNFILES_DIR="$0.runfiles"
+    fi
+fi
+if [[ -f "${RUNFILES_DIR:-/dev/null}/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+  source "${RUNFILES_DIR}/bazel_tools/tools/bash/runfiles/runfiles.bash"
+elif [[ -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+  source "$(grep -m1 "^bazel_tools/tools/bash/runfiles/runfiles.bash " \
+            "$RUNFILES_MANIFEST_FILE" | cut -d ' ' -f 2-)"
+else
+  echo >&2 "ERROR: cannot find @bazel_tools//tools/bash/runfiles:runfiles.bash"
+  exit 1
+fi
+# --- end runfiles.bash initialization ---
 
-# Load test environment
-source $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test-setup.sh \
-  || { echo "test-setup.sh not found!" >&2; exit 1; }
+source "$(rlocation "io_bazel/src/test/shell/integration_test_setup.sh")" \
+  || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
+
+# $1 is equal to the $(JAVABASE) make variable
+javabase="$1"
+if [[ $javabase = external/* ]]; then
+  javabase=${javabase#external/}
+fi
+javabase="$(rlocation "${javabase}/bin/java")"
+javabase=${javabase%/bin/java}
 
 function set_up() {
   copy_examples
+  create_workspace_with_default_repos "WORKSPACE" "io_bazel"
 }
 
 #
@@ -38,7 +67,7 @@ function test_cpp() {
 # An assertion that execute a binary from a sub directory (to test runfiles)
 function assert_binary_run_from_subdir() {
     ( # Needed to make execution from a different path work.
-    export PATH=${bazel_javabase}/bin:"$PATH" &&
+    export PATH=${javabase}/bin:"$PATH" &&
     mkdir -p x &&
     cd x &&
     unset JAVA_RUNFILES &&
@@ -62,63 +91,64 @@ function test_java_test() {
   local java_native_main=//examples/java-native/src/main/java/com/example/myproject
 
   assert_build "-- //examples/java-native/... -${java_native_main}:hello-error-prone"
-  assert_build_fails "${java_native_main}:hello-error-prone" \
-      "Did you mean 'result = b == -1;'?"
   assert_test_ok "${java_native_tests}:hello"
   assert_test_ok "${java_native_tests}:custom"
   assert_test_fails "${java_native_tests}:fail"
   assert_test_fails "${java_native_tests}:resource-fail"
 }
 
-function test_java_test_with_workspace_name() {
-  local java_pkg=examples/java-native/src/main/java/com/example/myproject
-  # Use named workspace and test if we can still execute hello-world
-  bazel clean
-
-  rm -f WORKSPACE
-  cat >WORKSPACE <<'EOF'
-workspace(name = "toto")
-EOF
-
-  assert_build_output ./bazel-bin/${java_pkg}/hello-world ${java_pkg}:hello-world
-  assert_binary_run_from_subdir "bazel-bin/${java_pkg}/hello-world foo" "Hello foo"
+function test_java_test_with_junitrunner() {
+  # Test with junitrunner.
+  setup_javatest_support
+  local java_native_tests=//examples/java-native/src/test/java/com/example/myproject
+  assert_test_ok "${java_native_tests}:custom_with_test_class"
 }
 
 function test_genrule_and_genquery() {
-  # The --javabase flag is to force the tools/jdk:jdk label to be used
-  # so it appears in the dependency list.
-  assert_build_output ./bazel-bin/examples/gen/genquery examples/gen:genquery --javabase=//tools/jdk
+  # With toolchain resolution java runtime only appears in cquery results.
+  # //tools/jdk:jdk label appears in the dependency list while --javabase
+  # is still available, because of migration rules.
+  assert_build_output ./bazel-bin/examples/gen/genquery examples/gen:genquery
   local want=./bazel-genfiles/examples/gen/genrule.txt
-  assert_build_output $want examples/gen:genrule --javabase=//tools/jdk
+  assert_build_output $want examples/gen:genrule
 
   diff $want ./bazel-bin/examples/gen/genquery \
     || fail "genrule and genquery output differs"
 
-  grep -qE "^//tools/jdk:jdk$" $want || {
+  grep -qE "^@bazel_tools//tools/jdk:jdk$" $want || {
     cat $want
-    fail "//tools/jdk:jdk not found in genquery output"
+    fail "@bazel_tools//tools/jdk:jdk not found in genquery output"
   }
 }
 
-if [ "${PLATFORM}" = "darwin" ]; then
-  function test_objc() {
-    setup_objc_test_support
-    # https://github.com/google/bazel/issues/162
-    # prevents us from running iOS tests.
-    # TODO(bazel-team): Execute iOStests here when this issue is resolved.
-    assert_build_output ./bazel-bin/examples/objc/PrenotCalculator.ipa \
-      //examples/objc:PrenotCalculator
-  }
-fi
-
 function test_native_python() {
-  assert_build //examples/py_native:bin --python2_path=python
-  assert_test_ok //examples/py_native:test --python2_path=python
-  assert_test_fails //examples/py_native:fail --python2_path=python
+  assert_build //examples/py_native:bin
+  assert_test_ok //examples/py_native:test
+  assert_test_fails //examples/py_native:fail
+}
+
+function test_native_python_with_zip() {
+  assert_build //examples/py_native:bin --build_python_zip
+  # run the python package directly
+  ./bazel-bin/examples/py_native/bin >& $TEST_log \
+    || fail "//examples/py_native:bin execution failed"
+  expect_log "Fib(5) == 8"
+  # Using python <zipfile> to run the python package
+  python ./bazel-bin/examples/py_native/bin >& $TEST_log \
+    || fail "//examples/py_native:bin execution failed"
+  expect_log "Fib(5) == 8"
+  assert_test_ok //examples/py_native:test --build_python_zip
+  assert_test_fails //examples/py_native:fail --build_python_zip
+}
+
+function test_shell() {
+  assert_build "//examples/shell:bin"
+  assert_bazel_run "//examples/shell:bin" "Hello Bazel!"
+  assert_test_ok "//examples/shell:test"
 }
 
 #
-# Skylark rules
+# Starlark rules
 #
 function test_python() {
   assert_build "//examples/py:bin"
@@ -136,8 +166,8 @@ function test_python() {
   expect_log "Hello"
 }
 
-function test_java_skylark() {
-  local java_pkg=examples/java-skylark/src/main/java/com/example/myproject
+function test_java_starlark() {
+  local java_pkg=examples/java-starlark/src/main/java/com/example/myproject
   assert_build_output ./bazel-bin/${java_pkg}/libhello-lib.jar ${java_pkg}:hello-lib
   assert_build_output ./bazel-bin/${java_pkg}/hello-data ${java_pkg}:hello-data
   assert_build_output ./bazel-bin/${java_pkg}/hello-world ${java_pkg}:hello-world
@@ -147,20 +177,12 @@ function test_java_skylark() {
   assert_binary_run_from_subdir "bazel-bin/${java_pkg}/hello-data foo" "Heyo foo"
 }
 
-function test_java_test_skylark() {
-  setup_skylark_javatest_support
-  javatests=examples/java-skylark/src/test/java/com/example/myproject
+function test_java_test_starlark() {
+  setup_starlark_javatest_support
+  javatests=examples/java-starlark/src/test/java/com/example/myproject
   assert_build //${javatests}:pass
   assert_test_ok //${javatests}:pass
   assert_test_fails //${javatests}:fail
-}
-
-function test_protobuf() {
-  setup_protoc_support
-  local jar=bazel-bin/examples/proto/libtest_proto.jar
-  assert_build_output $jar //examples/proto:test_proto
-  unzip -v $jar | grep -q 'KeyVal\.class' \
-    || fail "Did not find KeyVal class in proto jar."
 }
 
 run_suite "examples"

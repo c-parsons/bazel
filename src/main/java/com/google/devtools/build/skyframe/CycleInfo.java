@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,14 +13,14 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-
-import java.io.Serializable;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
@@ -30,7 +30,7 @@ import java.util.Set;
  * head of path to the cycle should be the value itself, or, if the value is actually in the cycle,
  * the cycle should start with the value.
  */
-public class CycleInfo implements Serializable {
+public class CycleInfo {
   private final ImmutableList<SkyKey> cycle;
   private final ImmutableList<SkyKey> pathToCycle;
 
@@ -39,9 +39,10 @@ public class CycleInfo implements Serializable {
     this(ImmutableList.<SkyKey>of(), cycle);
   }
 
-  CycleInfo(Iterable<SkyKey> pathToCycle, Iterable<SkyKey> cycle) {
+  public CycleInfo(Iterable<SkyKey> pathToCycle, Iterable<SkyKey> cycle) {
     this.pathToCycle = ImmutableList.copyOf(pathToCycle);
     this.cycle = ImmutableList.copyOf(cycle);
+    checkArgument(!this.cycle.isEmpty(), "Cycle cannot be empty: %s", this);
   }
 
   // If a cycle is already known, but we are processing a value in the middle of the cycle, we need
@@ -70,6 +71,10 @@ public class CycleInfo implements Serializable {
 
   public ImmutableList<SkyKey> getPathToCycle() {
     return pathToCycle;
+  }
+
+  public SkyKey getTopKey() {
+    return pathToCycle.isEmpty() ? cycle.get(0) : pathToCycle.get(0);
   }
 
   // Given a cycle and a value, if the value is part of the cycle, shift the cycle. Otherwise,

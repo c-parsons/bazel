@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2020 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,74 +13,114 @@
 // limitations under the License.
 package com.google.devtools.build.lib.worker;
 
-import com.google.common.base.Preconditions;
-
+import com.google.common.hash.HashCode;
+import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxInputs;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
+import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.worker.WorkerProtocol.WorkRequest;
+import com.google.devtools.build.lib.worker.WorkerProtocol.WorkResponse;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.lang.ProcessBuilder.Redirect;
+import java.util.Optional;
+import java.util.Set;
+import java.util.SortedMap;
 
 /**
- * Interface to a worker process running as a child process.
- *
- * <p>A worker process must follow this protocol to be usable via this class: The worker process is
- * spawned on demand. The worker process is free to exit whenever necessary, as new instances will
- * be relaunched automatically. Communication happens via the WorkerProtocol protobuf, sent to and
- * received from the worker process via stdin / stdout.
- *
- * <p>Other code in Blaze can talk to the worker process via input / output streams provided by this
- * class.
+ * An abstract superclass for persistent workers. Workers execute actions in long-running processes
+ * that can handle multiple actions.
  */
-final class Worker {
-  private final Process process;
-  private final Thread shutdownHook;
+public abstract class Worker {
 
-  private Worker(Process process, Thread shutdownHook) {
-    this.process = process;
-    this.shutdownHook = shutdownHook;
+  /** An unique identifier of the work process. */
+  protected final WorkerKey workerKey;
+  /** An unique ID of the worker. It will be used in WorkRequest and WorkResponse as well. */
+  protected final int workerId;
+  /** The path of the log file for this worker. */
+  protected final Path logFile;
+
+  public Worker(WorkerKey workerKey, int workerId, Path logFile) {
+    this.workerKey = workerKey;
+    this.workerId = workerId;
+    this.logFile = logFile;
   }
 
-  static Worker create(WorkerKey key) throws IOException {
-    Preconditions.checkNotNull(key);
-    ProcessBuilder processBuilder = new ProcessBuilder(key.getArgs().toArray(new String[0]))
-        .directory(key.getWorkDir().getPathFile())
-        .redirectError(Redirect.INHERIT);
-    processBuilder.environment().putAll(key.getEnv());
-
-    final Process process = processBuilder.start();
-
-    Thread shutdownHook = new Thread() {
-      @Override
-      public void run() {
-        process.destroy();
-      }
-    };
-    Runtime.getRuntime().addShutdownHook(shutdownHook);
-
-    return new Worker(process, shutdownHook);
+  /**
+   * Returns a unique id for this worker. This is used to distinguish different worker processes in
+   * logs and messages.
+   */
+  int getWorkerId() {
+    return this.workerId;
   }
 
-  void destroy() {
-    Runtime.getRuntime().removeShutdownHook(shutdownHook);
-    process.destroy();
+  /** Returns the path of the log file for this worker. */
+  public Path getLogFile() {
+    return logFile;
   }
 
-  boolean isAlive() {
-    // This is horrible, but Process.isAlive() is only available from Java 8 on and this is the
-    // best we can do prior to that.
-    try {
-      process.exitValue();
-      return false;
-    } catch (IllegalThreadStateException e) {
-      return true;
-    }
+  HashCode getWorkerFilesCombinedHash() {
+    return workerKey.getWorkerFilesCombinedHash();
   }
 
-  InputStream getInputStream() {
-    return process.getInputStream();
+  SortedMap<PathFragment, HashCode> getWorkerFilesWithHashes() {
+    return workerKey.getWorkerFilesWithHashes();
   }
 
-  OutputStream getOutputStream() {
-    return process.getOutputStream();
-  }
+  /** Returns true if this worker is sandboxed. */
+  public abstract boolean isSandboxed();
+
+  /**
+   * Sets the reporter this {@code Worker} should report anomalous events to, or clears it. We
+   * expect the reporter to be cleared at end of build.
+   */
+  void setReporter(EventHandler reporter) {}
+
+  /**
+   * Performs the necessary steps to prepare for execution. Once this is done, the worker should be
+   * able to receive a WorkRequest without further setup.
+   */
+  public abstract void prepareExecution(
+      SandboxInputs inputFiles, SandboxOutputs outputs, Set<PathFragment> workerFiles)
+      throws IOException;
+
+  /**
+   * Sends a WorkRequest to the worker.
+   *
+   * @param request The request to send.
+   * @throws IOException If there was a problem doing I/O, or this thread was interrupted at a time
+   *     where some or all of the expected I/O has been done.
+   */
+  abstract void putRequest(WorkRequest request) throws IOException;
+
+  /**
+   * Waits to receive a response from the worker. This method should return as soon as a response
+   * has been received, moving of files and cleanup should wait until finishExecution().
+   *
+   * @param requestId ID of the request to retrieve a response for.
+   * @return The WorkResponse received.
+   * @throws IOException If there was a problem doing I/O.
+   * @throws InterruptedException If this thread was interrupted, which can also happen during IO.
+   */
+  abstract WorkResponse getResponse(int requestId) throws IOException, InterruptedException;
+
+  /** Does whatever cleanup may be required after execution is done. */
+  public abstract void finishExecution(Path execRoot, SandboxOutputs outputs) throws IOException;
+
+  /**
+   * Destroys this worker. Once this has been called, we assume it's safe to clean up related
+   * directories.
+   */
+  abstract void destroy();
+
+  /** Returns true if this worker is dead but we didn't deliberately kill it. */
+  abstract boolean diedUnexpectedly();
+
+  /** Returns the exit value of this worker's process, if it has exited. */
+  public abstract Optional<Integer> getExitValue();
+
+  /**
+   * Returns the last message received on the InputStream, if an unparseable message has been
+   * received.
+   */
+  abstract String getRecordingStreamMessage();
 }

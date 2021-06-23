@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,21 +13,19 @@
 // limitations under the License.
 package com.google.devtools.build.lib.shell;
 
-import static org.junit.Assert.assertTrue;
+import static com.google.common.truth.Truth.assertThat;
 
 import com.google.devtools.build.lib.shell.Consumers.OutErrConsumers;
-
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
-
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /**
  * Tests that InterruptedExceptions can't derail FutureConsumption
@@ -38,8 +36,7 @@ import java.util.logging.Logger;
 public class FutureConsumptionTest {
 
   @Before
-  public void setUp() throws Exception {
-
+  public final void configureLogger() throws Exception  {
     // enable all log statements to ensure there are no problems with
     // logging code
     Logger.getLogger("com.google.devtools.build.lib.shell.Command").setLevel(Level.FINEST);
@@ -97,6 +94,6 @@ public class FutureConsumptionTest {
     // In addition to asserting that we were interrupted, this clears the interrupt bit of the
     // current thread, since Junit doesn't do it for us. This avoids the next test to run starting
     // in an interrupted state.
-    assertTrue(Thread.interrupted());
+    assertThat(Thread.interrupted()).isTrue();
   }
 }

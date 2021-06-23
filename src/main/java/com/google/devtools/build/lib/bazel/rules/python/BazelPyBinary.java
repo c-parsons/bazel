@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,13 +14,11 @@
 
 package com.google.devtools.build.lib.bazel.rules.python;
 
-import com.google.devtools.build.lib.rules.python.PyBinary;
+import com.google.devtools.build.lib.rules.python.PyExecutable;
 import com.google.devtools.build.lib.rules.python.PythonSemantics;
 
-/**
- * Implementation of the {@code py_binary} rule for Bazel.
- */
-public class BazelPyBinary extends PyBinary {
+/** Bazel-specific implementation of {@code py_binary}. */
+public class BazelPyBinary extends PyExecutable {
   @Override
   protected PythonSemantics createSemantics() {
     return new BazelPythonSemantics();

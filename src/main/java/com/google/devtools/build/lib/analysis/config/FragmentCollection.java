@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,43 +16,59 @@ package com.google.devtools.build.lib.analysis.config;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableCollection;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.syntax.ClassObject;
-import com.google.devtools.build.lib.syntax.SkylarkModule;
-
+import com.google.devtools.build.lib.starlarkbuildapi.FragmentCollectionApi;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
 
-/**
- * Represents a collection of configuration fragments in Skylark.
- */
+/** Represents a collection of configuration fragments in Starlark. */
+// Documentation can be found at ctx.fragments
 @Immutable
-@SkylarkModule(name = "fragments", doc = "Allows access to configuration fragments.")
-public class FragmentCollection implements ClassObject {
+public class FragmentCollection implements FragmentCollectionApi {
   private final RuleContext ruleContext;
+  private final ConfigurationTransition transition;
 
-  public FragmentCollection(RuleContext ruleContext) {
+  public FragmentCollection(RuleContext ruleContext, ConfigurationTransition transition) {
     this.ruleContext = ruleContext;
+    this.transition = transition;
+  }
+
+  @Override
+  public boolean isImmutable() {
+    return true; // immutable and Starlark-hashable
   }
 
   @Override
   @Nullable
-  public Object getValue(String name) {
-    return ruleContext.getSkylarkFragment(name);
+  public Object getValue(String name) throws EvalException {
+    return ruleContext.getStarlarkFragment(name, transition);
   }
 
   @Override
-  public ImmutableCollection<String> getKeys() {
-    return ruleContext.getSkylarkFragmentNames();
+  public ImmutableCollection<String> getFieldNames() {
+    return ruleContext.getStarlarkFragmentNames(transition);
   }
 
   @Override
   @Nullable
-  public String errorMessage(String name) {
-    return String.format("There is no configuration fragment named '%s'. Available fragments: %s",
-        name, printKeys());
+  public String getErrorMessageForUnknownField(String name) {
+    return String.format(
+        "There is no configuration fragment named '%s' in %s configuration. "
+        + "Available fragments: %s",
+        name, getConfigurationName(transition), fieldsToString());
   }
 
-  private String printKeys() {
-    return String.format("'%s'", Joiner.on("', '").join(getKeys()));
+  private String fieldsToString() {
+    return String.format("'%s'", Joiner.on("', '").join(getFieldNames()));
+  }
+
+  public static String getConfigurationName(ConfigurationTransition config) {
+    return config.isHostTransition() ? "host" : "target";
+  }
+
+  @Override
+  public String toString() {
+    return getConfigurationName(transition) + ": [ " + fieldsToString() + "]";
   }
 }

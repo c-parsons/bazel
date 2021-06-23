@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
-import com.google.devtools.build.lib.syntax.Label;
-
+import com.google.devtools.build.lib.cmdline.Label;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
@@ -68,8 +67,9 @@ public abstract class AbstractConstraintsTest extends BuildViewTestCase {
             .append(getAttrDef("fulfills", fulfillsMap.get(env).toArray(new String[0])))
             .append(")\n");
       }
+      String envGroupName = name.contains("/") ? name.substring(name.lastIndexOf("/") + 1) : name;
       builder.append("environment_group(\n")
-          .append("    name = '" + name + "',\n")
+          .append("    name = '" + envGroupName + "',\n")
           .append(getAttrDef("environments", environments.toArray(new String[0])) + ",\n")
           .append(getAttrDef("defaults", defaults.toArray(new String[0])) + ",\n")
           .append(")");
@@ -149,7 +149,9 @@ public abstract class AbstractConstraintsTest extends BuildViewTestCase {
    */
   protected Collection<Label> supportedEnvironments(String ruleName, String ruleDef)
       throws Exception {
-    return ConstraintSemantics.getSupportedEnvironments(
-        getRuleContext(scratchConfiguredTarget("hello", ruleName, ruleDef))).getEnvironments();
+    return (new RuleContextConstraintSemantics())
+        .getSupportedEnvironments(
+            getRuleContext(scratchConfiguredTarget("hello", ruleName, ruleDef)))
+        .getEnvironments();
   }
 }

@@ -1,96 +1,55 @@
 package(default_visibility = ["//visibility:public"])
 
 filegroup(
-    name = "jni_header",
-    srcs = ["//external:jni_header"],
+    name = "BUILD-jdk",
+    srcs = [":BUILD.tools"],
 )
-
-filegroup(
-    name = "jni_md_header-darwin",
-    srcs = ["//external:jni_md_header-darwin"],
-)
-
-filegroup(
-    name = "jni_md_header-linux",
-    srcs = ["//external:jni_md_header-linux"],
-)
-
-filegroup(
-    name = "java",
-    srcs = ["//external:java"],
-)
-
-filegroup(
-    name = "jar",
-    srcs = ["//external:jar"],
-)
-
-filegroup(
-    name = "javac",
-    srcs = ["//external:javac"],
-)
-
-BOOTCLASS_JARS = [
-    "rt.jar",
-    "resources.jar",
-    "jsse.jar",
-    "jce.jar",
-    "charsets.jar",
-]
-
-filegroup(
-    name = "bootclasspath",
-    srcs = ["//external:bootclasspath"],
-)
-
-filegroup(
-    name = "extdir",
-    srcs = ["//external:extdir"],
-)
-
-filegroup(
-    name = "langtools",
-    srcs = ["//third_party/java/jdk/langtools:javac_jar"],
-)
-
-java_import(
-    name = "langtools-neverlink",
-    jars = [":langtools"],
-    neverlink = 1,
-)
-
-# This one is just needed because of how filegroup redirection works.
-filegroup(name = "jdk-null")
-
-filegroup(
-    name = "jdk",
-    srcs = [
-        ":jdk-null",
-        "//external:jdk-default",
-    ],
-)
-
-java_toolchain(
-    name = "toolchain",
-    encoding = "UTF-8",
-    jvm_opts = ["-client"],
-    source_version = "7",
-    target_version = "7",
-)
-
-exports_files([
-    "JavaBuilder_deploy.jar",
-    "ijar",
-    "SingleJar_deploy.jar",
-    "GenClass_deploy.jar",
-])
 
 filegroup(
     name = "srcs",
-    srcs = ["BUILD"],  # Tools are build from the workspace for tests.
+    srcs = [
+        "BUILD",
+        "BUILD.java_langtools",
+        "BUILD.java_tools",
+        "BUILD.java_tools_prebuilt",
+        "BUILD-jdk",  # Tools are build from the workspace for tests.
+        "DumpPlatformClassPath.java",
+        "default_java_toolchain.bzl",
+        "fail_rule.bzl",
+        "java_toolchain_alias.bzl",
+        "jdk.BUILD",
+        "local_java_repository.bzl",
+        "nosystemjdk/README",
+        "proguard_whitelister.py",
+        "proguard_whitelister_test.py",
+        "proguard_whitelister_test_input.pgcfg",
+        "remote_java_repository.bzl",
+        "toolchain_utils.bzl",
+    ],
+)
+
+filegroup(
+    name = "bzl_srcs",
+    srcs = glob(["*.bzl"]),
+    visibility = ["//tools:__pkg__"],
 )
 
 filegroup(
     name = "package-srcs",
     srcs = glob(["**"]),
+)
+
+test_suite(
+    name = "windows_tests",
+    tags = [
+        "-no_windows",
+        "-slow",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+test_suite(
+    name = "all_windows_tests",
+    tests = [":windows_tests"],
+    visibility = ["//tools:__pkg__"],
 )

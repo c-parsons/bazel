@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,23 +13,16 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
-import com.google.common.base.Predicate;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.actions.ActionKeyContext;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.WorkspaceStatusAction.Factory;
-import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory;
-import com.google.devtools.build.lib.events.Reporter;
+import com.google.devtools.build.lib.bugreport.BugReporter;
 import com.google.devtools.build.lib.packages.PackageFactory;
-import com.google.devtools.build.lib.packages.Preprocessor;
 import com.google.devtools.build.lib.util.AbruptExitException;
-import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
-import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionName;
-
-import java.util.Set;
 
 /**
 * A factory that creates instances of SkyframeExecutor.
@@ -39,34 +32,24 @@ public interface SkyframeExecutorFactory {
   /**
    * Creates an instance of SkyframeExecutor
    *
-   * @param reporter the reporter to be used by the executor
    * @param pkgFactory the package factory
-   * @param tsgm timestamp granularity monitor
+   * @param fileSystem the Blaze file system
    * @param directories Blaze directories
    * @param workspaceStatusActionFactory a factory for creating WorkspaceStatusAction objects
-   * @param buildInfoFactories list of BuildInfoFactories
-   * @param diffAwarenessFactories
-   * @param allowedMissingInputs
-   * @param preprocessorFactorySupplier
-   * @param extraSkyFunctions
-   * @param extraPrecomputedValues
-   * @param customDirtinessCheckers
+   * @param bugReporter BugReporter: always BugReporter.defaultInstance() outside of Java tests
    * @return an instance of the SkyframeExecutor
    * @throws AbruptExitException if the executor cannot be created
    */
   SkyframeExecutor create(
-      Reporter reporter,
       PackageFactory pkgFactory,
-      TimestampGranularityMonitor tsgm,
+      FileSystem fileSystem,
       BlazeDirectories directories,
+      ActionKeyContext actionKeyContext,
       Factory workspaceStatusActionFactory,
-      ImmutableList<BuildInfoFactory> buildInfoFactories,
-      Set<Path> immutableDirectories,
       Iterable<? extends DiffAwareness.Factory> diffAwarenessFactories,
-      Predicate<PathFragment> allowedMissingInputs,
-      Preprocessor.Factory.Supplier preprocessorFactorySupplier,
       ImmutableMap<SkyFunctionName, SkyFunction> extraSkyFunctions,
-      ImmutableList<PrecomputedValue.Injected> extraPrecomputedValues,
-      Iterable<SkyValueDirtinessChecker> customDirtinessCheckers)
+      Iterable<SkyValueDirtinessChecker> customDirtinessCheckers,
+      ManagedDirectoriesKnowledge managedDirectoriesKnowledge,
+      BugReporter bugReporter)
       throws AbruptExitException;
 }

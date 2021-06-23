@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,8 +25,7 @@ import com.google.common.base.Preconditions;
  */
 public class NonconfigurableAttributeMapper extends AbstractAttributeMapper {
   private NonconfigurableAttributeMapper(Rule rule) {
-    super(rule.getPackage(), rule.getRuleClassObject(), rule.getLabel(),
-        rule.getAttributeContainer());
+    super(rule);
   }
 
   /**
@@ -41,9 +40,10 @@ public class NonconfigurableAttributeMapper extends AbstractAttributeMapper {
   }
 
   @Override
-  public <T> T get(String attributeName, Type<T> type) {
+  public <T> T get(String attributeName, com.google.devtools.build.lib.packages.Type<T> type) {
+    T attr = super.get(attributeName, type);
     Preconditions.checkState(!getAttributeDefinition(attributeName).isConfigurable(),
         "Attribute '%s' is potentially configurable - not allowed here", attributeName);
-    return super.get(attributeName, type);
+    return attr;
   }
 }

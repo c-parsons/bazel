@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,21 +17,17 @@ package com.google.devtools.build.zip;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.testing.NullPointerTester;
-
-import org.junit.Rule;
+import java.io.IOException;
+import java.io.InputStream;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.io.IOException;
-import java.io.InputStream;
-
 @RunWith(JUnit4.class)
 public class ExtraDataListTest {
-  @Rule public ExpectedException thrown = ExpectedException.none();
 
-  @Test public void testNulls() {
+  @Test
+  public void testNulls() {
     NullPointerTester tester = new NullPointerTester();
     tester.testAllPublicConstructors(ExtraDataList.class);
     tester.testAllPublicInstanceMethods(new ExtraDataList());

@@ -1,34 +1,56 @@
 genrule(
     name = "copy_link_jni_md_header",
     srcs = select({
-        "//src:darwin": ["//tools/jdk:jni_md_header-darwin"],
-        "//conditions:default": ["//tools/jdk:jni_md_header-linux"],
+        "//src/conditions:darwin": ["@bazel_tools//tools/jdk:jni_md_header-darwin"],
+        "//src/conditions:freebsd": ["@bazel_tools//tools/jdk:jni_md_header-freebsd"],
+        "//src/conditions:openbsd": ["@bazel_tools//tools/jdk:jni_md_header-openbsd"],
+        "//src/conditions:windows": ["@bazel_tools//tools/jdk:jni_md_header-windows"],
+        "//conditions:default": ["@bazel_tools//tools/jdk:jni_md_header-linux"],
     }),
     outs = ["jni_md.h"],
     cmd = "cp -f $< $@",
+    visibility = ["//src/main/native:__subpackages__"],
 )
 
 genrule(
     name = "copy_link_jni_header",
-    srcs = ["//tools/jdk:jni_header"],
+    srcs = ["@bazel_tools//tools/jdk:jni_header"],
     outs = ["jni.h"],
     cmd = "cp -f $< $@",
+    visibility = ["//src/main/native:__subpackages__"],
 )
 
 filegroup(
     name = "jni_os",
     srcs = select({
-        "//src:darwin": ["unix_jni_darwin.cc"],
+        "//src/conditions:darwin": [
+            "unix_jni_darwin.cc",
+            "fsevents.cc",
+        ],
+        "//src/conditions:freebsd": ["unix_jni_bsd.cc"],
+        "//src/conditions:openbsd": ["unix_jni_bsd.cc"],
         "//conditions:default": ["unix_jni_linux.cc"],
     }),
 )
 
-cc_binary(
-    name = "libunix.so",
+cc_library(
+    name = "latin1_jni_path",
     srcs = [
-        "localsocket.cc",
+        "latin1_jni_path.cc",
+        ":jni.h",
+        ":jni_md.h",
+    ],
+    hdrs = ["latin1_jni_path.h"],
+    includes = ["."],  # For jni headers.
+)
+
+cc_binary(
+    name = "libunix_jni.so",
+    srcs = [
+        "macros.h",
         "process.cc",
         "unix_jni.cc",
+        "unix_jni.h",
         ":jni.h",
         ":jni_md.h",
         ":jni_os",
@@ -38,19 +60,43 @@ cc_binary(
         "-DBLAZE_JAVA_CPU=\"k8\"",
     ],
     includes = ["."],  # For jni headers.
+    linkopts = select({
+        "//src/conditions:darwin": ["-framework CoreServices"],
+        "//conditions:default": [],
+    }),
     linkshared = 1,
-    visibility = ["//src:__subpackages__"],
+    visibility = ["//src/main/java/com/google/devtools/build/lib/jni:__pkg__"],
     deps = [
+        ":latin1_jni_path",
+        "//src/main/cpp/util",
         "//src/main/cpp/util:md5",
     ],
 )
 
-# HACK for Mac: copy libunix.so to libunix.dylib. We'll need to come up with a
-# way to support platform-specific dynamic library extensions.
+# TODO(bazel-team): Come up with a way to support platform-specific dynamic
+# library extensions.  This is issue #914.
 genrule(
     name = "mac-compat",
-    srcs = ["libunix.so"],
-    outs = ["libunix.dylib"],
+    srcs = ["libunix_jni.so"],
+    outs = ["libunix_jni.dylib"],
     cmd = "cp $< $@",
-    visibility = ["//src:__subpackages__"],
+    output_to_bindir = 1,
+    visibility = ["//src/main/java/com/google/devtools/build/lib/jni:__pkg__"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]) + [
+        "//src/main/native/windows:srcs",
+    ],
+    visibility = ["//src:__pkg__"],
+)
+
+filegroup(
+    name = "embedded_tools",
+    srcs = [
+        "BUILD",
+        "//src/main/native/windows:embedded_tools",
+    ],
+    visibility = ["//visibility:public"],
 )

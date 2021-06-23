@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,23 +13,21 @@
 // limitations under the License.
 package com.google.devtools.build.lib.actions;
 
-/**
- * An TestExecException that is related to the failure of a TestAction.
- */
-public final class TestExecException extends ExecException {
+import static com.google.common.base.Preconditions.checkNotNull;
 
-  public TestExecException(String message) {
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+
+/** An TestExecException that is related to the failure of a TestAction. */
+public final class TestExecException extends ExecException {
+  private final FailureDetail failureDetail;
+
+  public TestExecException(String message, FailureDetail failureDetail) {
     super(message);
+    this.failureDetail = checkNotNull(failureDetail);
   }
 
   @Override
-  public ActionExecutionException toActionExecutionException(String messagePrefix,
-      boolean verboseFailures, Action action) {
-    String message = messagePrefix + " failed" + getMessage();
-    if (verboseFailures) {
-      return new ActionExecutionException(message, this, action, isCatastrophic());
-    } else {
-      return new ActionExecutionException(message, action, isCatastrophic());
-    }
+  protected FailureDetail getFailureDetail(String message) {
+    return failureDetail.toBuilder().setMessage(message).build();
   }
 }

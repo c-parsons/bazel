@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,7 +54,7 @@ public class DocCheckerUtils {
     return getFirstUnclosedTag(src, false);
   }
 
-  // TODO(bazel-team): run this on the Skylark docs too.
+  // TODO(bazel-team): run this on the Starlark docs too.
   private static String getFirstUnclosedTag(String src, boolean printHelp) {
     Matcher commentMatcher = COMMENT_PATTERN.matcher(src);
     src = commentMatcher.replaceAll("");

@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,20 +13,19 @@
 // limitations under the License.
 package com.google.devtools.build.android;
 
-import java.io.File;
 import java.nio.file.Path;
 
 /**
  * Represents the AndroidData before processing, after merging.
- * 
- * <p>
- * The life cycle of AndroidData goes:
+ *
+ * <p>The life cycle of AndroidData goes:
+ *
  * <pre>
  * UnvalidatedAndroidData -> MergedAndroidData -> DensityFilteredAndroidData
  *      -> DependencyAndroidData
  * </pre>
  */
-class MergedAndroidData {
+class MergedAndroidData implements ManifestContainer {
 
   private Path resourceDir;
   private Path assetDir;
@@ -38,23 +37,24 @@ class MergedAndroidData {
     this.manifest = manifest;
   }
 
-  public File getResourceDirFile() {
-    return resourceDir.toFile();
+  public Path getResourceDir() {
+    return resourceDir;
   }
 
-  public File getAssetDirFile() {
-    return assetDir != null ? assetDir.toFile() : null;
+  public Path getAssetDir() {
+    return assetDir;
   }
 
-  public File getManifestFile() {
-    return manifest.toFile();
+  @Override
+  public Path getManifest() {
+    return manifest;
   }
 
   public DensityFilteredAndroidData filter(
       DensitySpecificResourceFilter resourceFilter,
       DensitySpecificManifestProcessor manifestProcessor)
-          throws ManifestProcessingException {
-    return new DensityFilteredAndroidData(resourceFilter.filter(resourceDir),
-        assetDir, manifestProcessor.process(manifest));
+      throws ManifestProcessingException {
+    return new DensityFilteredAndroidData(
+        resourceFilter.filter(resourceDir), assetDir, manifestProcessor.process(manifest));
   }
 }

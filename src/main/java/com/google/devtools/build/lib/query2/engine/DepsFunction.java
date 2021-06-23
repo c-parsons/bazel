@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,29 +13,28 @@
 // limitations under the License.
 package com.google.devtools.build.lib.query2.engine;
 
-import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.profiler.Profiler;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.Argument;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.ArgumentType;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.CustomFunctionQueryEnvironment;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryFunction;
-
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.LinkedHashSet;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryTaskFuture;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.ThreadSafeMutableSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * A "deps" query expression, which computes the dependencies of the argument. An optional
  * integer-literal second argument may be specified; its value bounds the search from the arguments.
  *
  * <pre>expr ::= DEPS '(' expr ')'</pre>
+ *
  * <pre>       | DEPS '(' expr ',' WORD ')'</pre>
  */
 final class DepsFunction implements QueryFunction {
-  DepsFunction() {
-  }
+  DepsFunction() {}
 
   @Override
   public String getName() {
@@ -44,7 +43,7 @@ final class DepsFunction implements QueryFunction {
 
   @Override
   public int getMandatoryArguments() {
-    return 1;  // last argument is optional
+    return 1; // last argument is optional
   }
 
   @Override
@@ -52,35 +51,68 @@ final class DepsFunction implements QueryFunction {
     return ImmutableList.of(ArgumentType.EXPRESSION, ArgumentType.INTEGER);
   }
 
-  /**
-   * Breadth-first search from the arguments.
-   */
+  /** Breadth-first search from the arguments. */
+  @SuppressWarnings("unchecked")
   @Override
-  public <T> Set<T> eval(QueryEnvironment<T> env, QueryExpression expression, List<Argument> args)
-      throws QueryException, InterruptedException {
-    Set<T> argumentValue = args.get(0).getExpression().eval(env);
-    int depthBound = args.size() > 1 ? args.get(1).getInteger() : Integer.MAX_VALUE;
-    env.buildTransitiveClosure(expression, argumentValue, depthBound);
-
-    Set<T> visited = new LinkedHashSet<>();
-    Collection<T> current = argumentValue;
-
-    // We need to iterate depthBound + 1 times.
-    for (int i = 0; i <= depthBound; i++) {
-      List<T> next = new ArrayList<>();
-      // Filter already visited nodes: if we see a node in a later round, then we don't need to
-      // visit it again, because the depth at which we see it at must be greater than or equal to
-      // the last visit.
-      next.addAll(env.getFwdDeps(Iterables.filter(current,
-          Predicates.not(Predicates.in(visited)))));
-      visited.addAll(current);
-      if (next.isEmpty()) {
-        // Exit when there are no more nodes to visit.
-        break;
+  public <T> QueryTaskFuture<Void> eval(
+      final QueryEnvironment<T> env,
+      QueryExpressionContext<T> context,
+      final QueryExpression expression,
+      List<Argument> args,
+      final Callback<T> callback) {
+    QueryExpression queryExpression = args.get(0).getExpression();
+    final int depthBound = args.size() > 1 ? args.get(1).getInteger() : Integer.MAX_VALUE;
+    if (env instanceof StreamableQueryEnvironment) {
+      if (args.size() == 1) {
+        return ((StreamableQueryEnvironment<T>) env)
+            .getDepsUnboundedParallel(queryExpression, context, callback, expression);
       }
-      current = next;
+      return ((StreamableQueryEnvironment<T>) env)
+          .getDepsBounded(queryExpression, context, callback, depthBound, expression);
     }
 
-    return visited;
+    if (env instanceof QueryEnvironment.CustomFunctionQueryEnvironment) {
+      // Not all expressions generate a single future (e.g. SetExpression), as such, we should batch
+      // them here before the heavy blocking work is done in the callback to deps.
+      return ((QueryEnvironment.CustomFunctionQueryEnvironment) env)
+          .eval(
+              queryExpression,
+              context,
+              result ->
+                  ((CustomFunctionQueryEnvironment<T>) env)
+                      .deps(result, depthBound, expression, callback),
+              /* batch= */ true);
+    }
+
+    final MinDepthUniquifier<T> minDepthUniquifier = env.createMinDepthUniquifier();
+    return env.eval(
+        queryExpression,
+        context,
+        partialResult -> {
+          ThreadSafeMutableSet<T> current = env.createThreadSafeMutableSet();
+          Iterables.addAll(current, partialResult);
+          try (SilentCloseable closeable =
+              Profiler.instance().profile("env.buildTransitiveClosure")) {
+            env.buildTransitiveClosure(expression, current, depthBound);
+          }
+
+          // We need to iterate depthBound + 1 times.
+          for (int i = 0; i <= depthBound; i++) {
+            // Filter already visited nodes: if we see a node in a later round, then we don't need
+            // to visit it again, because the depth at which we see it at must be greater than or
+            // equal to the last visit.
+            ImmutableList<T> toProcess =
+                minDepthUniquifier.uniqueAtDepthLessThanOrEqualTo(current, i);
+            callback.process(toProcess);
+            current = env.createThreadSafeMutableSet();
+            try (SilentCloseable closeable = Profiler.instance().profile("env.getFwdDeps")) {
+              Iterables.addAll(current, env.getFwdDeps(toProcess, context));
+            }
+            if (current.isEmpty()) {
+              // Exit when there are no more nodes to visit.
+              break;
+            }
+          }
+        });
   }
 }

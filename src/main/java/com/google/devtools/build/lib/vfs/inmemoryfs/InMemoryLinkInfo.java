@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,17 +13,18 @@
 // limitations under the License.
 package com.google.devtools.build.lib.vfs.inmemoryfs;
 
+import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.util.Clock;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
 /**
- * This interface represents a symbolic link to an absolute or relative path,
- * stored in an InMemoryFileSystem.
+ * This interface represents a symbolic link to an absolute or relative path, stored in an
+ * InMemoryFileSystem.
  */
-@ThreadSafe @Immutable
-class InMemoryLinkInfo extends InMemoryContentInfo {
+@ThreadSafe
+@Immutable
+final class InMemoryLinkInfo extends InMemoryContentInfo {
 
   private final PathFragment linkContent;
   private final PathFragment normalizedLinkContent;
@@ -31,7 +32,7 @@ class InMemoryLinkInfo extends InMemoryContentInfo {
   InMemoryLinkInfo(Clock clock, PathFragment linkContent) {
     super(clock);
     this.linkContent = linkContent;
-    this.normalizedLinkContent = linkContent.normalize();
+    this.normalizedLinkContent = linkContent;
   }
 
   @Override
@@ -50,8 +51,13 @@ class InMemoryLinkInfo extends InMemoryContentInfo {
   }
 
   @Override
+  public boolean isSpecialFile() {
+    return false;
+  }
+
+  @Override
   public long getSize() {
-    return linkContent.toString().length();
+    return linkContent.getSafePathString().length();
   }
 
   /**

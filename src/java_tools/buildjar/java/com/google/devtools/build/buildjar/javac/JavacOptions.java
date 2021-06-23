@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,57 +14,96 @@
 
 package com.google.devtools.build.buildjar.javac;
 
+import com.google.auto.value.AutoValue;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
-
+import com.google.common.primitives.Ints;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
 /**
- * Preprocess javac -Xlint options. We
- * also need to make the different versions of javac treat -Xlint options
- * uniformly.
+ * Preprocess javac -Xlint options. We also need to make the different versions of javac treat
+ * -Xlint options uniformly.
  *
- * <p>Some versions of javac now process the -Xlint options without allowing
- * later options to override earlier ones on the command line. For example,
- * {@code -Xlint:All -Xlint:None} results in all warnings being enabled.
+ * <p>Some versions of javac now process the -Xlint options without allowing later options to
+ * override earlier ones on the command line. For example, {@code -Xlint:All -Xlint:None} results in
+ * all warnings being enabled.
  *
- * <p>This class preprocesses the -Xlint options within the javac options to
- * achieve a command line that is sensitive to ordering. That is, with this
- * preprocessing step, {@code -Xlint:all -Xlint:none} results in no
- * warnings being enabled.
- *
- * <p>TODO(bazel-team): Convince the current javac owners that the javac options
- * need to behave the way this class behaves. :-)
+ * <p>This class preprocesses the -Xlint options within the javac options to achieve a command line
+ * that is sensitive to ordering. That is, with this preprocessing step, {@code -Xlint:all
+ * -Xlint:none} results in no warnings being enabled.
  */
 public final class JavacOptions {
 
-  private static final XlintOptionNormalizer XLINT_OPTION_NORMALIZER = new XlintOptionNormalizer();
+  /** Returns an immutable list containing all the non-Bazel specific Javac flags. */
+  public static ImmutableList<String> removeBazelSpecificFlags(String[] javacopts) {
+    return removeBazelSpecificFlags(Arrays.asList(javacopts));
+  }
+
+  /** Returns an immutable list containing all the non-Bazel specific Javac flags. */
+  public static ImmutableList<String> removeBazelSpecificFlags(Iterable<String> javacopts) {
+    return filterJavacopts(javacopts).standardJavacopts();
+  }
+
+  /** A collection of javac flags, divided into Bazel-specific and standard options. */
+  @AutoValue
+  public abstract static class FilteredJavacopts {
+    /** Bazel-specific javac flags, e.g. Error Prone's -Xep: flags. */
+    public abstract ImmutableList<String> bazelJavacopts();
+
+    /** Standard javac flags. */
+    public abstract ImmutableList<String> standardJavacopts();
+
+    /** Creates a {@link FilteredJavacopts}. */
+    public static FilteredJavacopts create(
+        ImmutableList<String> bazelJavacopts, ImmutableList<String> standardJavacopts) {
+      return new AutoValue_JavacOptions_FilteredJavacopts(bazelJavacopts, standardJavacopts);
+    }
+  }
+
+  /** Filters a list of javac flags into Bazel-specific and standard flags. */
+  public static FilteredJavacopts filterJavacopts(Iterable<String> javacopts) {
+    ImmutableList.Builder<String> bazelJavacopts = ImmutableList.builder();
+    ImmutableList.Builder<String> standardJavacopts = ImmutableList.builder();
+    for (String opt : javacopts) {
+      if (isBazelSpecificFlag(opt)) {
+        bazelJavacopts.add(opt);
+      } else {
+        standardJavacopts.add(opt);
+      }
+    }
+    return FilteredJavacopts.create(bazelJavacopts.build(), standardJavacopts.build());
+  }
+
+  private static boolean isBazelSpecificFlag(String opt) {
+    return opt.startsWith("-Werror:") || opt.startsWith("-Xep");
+  }
 
   /**
    * Interface to define an option normalizer. For instance, to group all -Xlint: option into one
    * place.
-   * 
-   * <p>All normalizers used by the JavacOptions class will be started by calling the
-   * {@link #start()} method when starting the parsing of a list of option. For each option, the
-   * first option normalized whose {@link #processOption(String)} method returns true stops its
-   * parsing and the option is supposed to be added at the end to the normalized list of option with
-   * the {@link #normalize(List)} method. Options not handled by a normalizer will be returned as
-   * such in the normalized option list.
+   *
+   * <p>For each option, the first option normalized whose {@link #processOption} method returns
+   * true stops its parsing and the option is supposed to be added at the end to the normalized list
+   * of option with the {@link #normalize(List)} method. Options not handled by a normalizer will be
+   * returned as such in the normalized option list.
    */
-  public static interface JavacOptionNormalizer {
-    /** Resets the state of the normalizer to start a new option parsing. */
-    void start();
-
-    /** Process an option and return true if the option was handled by this normalizer. */
-    boolean processOption(String option);
+  public interface JavacOptionNormalizer {
+    /**
+     * Process an option and return true if the option was handled by this normalizer. {@code
+     * remaining} provides an iterator to any remaining options so normalizers that process
+     * non-nullary options can also process the options' arguments.
+     */
+    boolean processOption(String option, Iterator<String> remaining);
 
     /**
-     * Add the normalized versions of the options handled by {@link #processOption(String)} to the
-     * {@code normalized} list
-     **/
+     * Add the normalized versions of the options handled by {@link #processOption} to the {@code
+     * normalized} list
+     */
     void normalize(List<String> normalized);
   }
 
@@ -80,10 +119,10 @@ public final class JavacOptions {
 
     /**
      * This type models a starting selection from which lint options can be added or removed. E.g.,
-     * {@code -Xlint} indicates we start with the set of recommended checks enabled, and
-     * {@code -Xlint:none} means we start without any checks enabled.
+     * {@code -Xlint} indicates we start with the set of recommended checks enabled, and {@code
+     * -Xlint:none} means we start without any checks enabled.
      */
-    private static enum BasisXlintSelection {
+    private enum BasisXlintSelection {
       /** {@code -Xlint:none} */
       None,
       /** {@code -Xlint:all} */
@@ -106,15 +145,11 @@ public final class JavacOptions {
     public XlintOptionNormalizer(ImmutableList<String> enforcedXlints) {
       this.enforcedXlints = enforcedXlints;
       xlintPlus = new LinkedHashSet<>(enforcedXlints);
-    }
-
-    @Override
-    public void start() {
       resetBasisTo(BasisXlintSelection.Empty);
     }
 
     @Override
-    public boolean processOption(String option) {
+    public boolean processOption(String option, Iterator<String> remaining) {
       if (option.equals("-nowarn")) {
         // It is equivalent to -Xlint:none
         resetBasisTo(BasisXlintSelection.None);
@@ -188,24 +223,188 @@ public final class JavacOptions {
   }
 
   /**
+   * Normalizer for {@code -source}, {@code -target}, and {@code --release} options. If both {@code
+   * -source} and {@code --release} are specified, {@code --release} wins.
+   */
+  public static class ReleaseOptionNormalizer implements JavacOptionNormalizer {
+
+    private String source;
+    private String target;
+    private String release;
+    private final List<String> modular = new ArrayList<>();
+
+    @Override
+    public boolean processOption(String option, Iterator<String> remaining) {
+      switch (option) {
+        case "-source":
+          if (remaining.hasNext()) {
+            source = remaining.next();
+            release = null;
+          }
+          return true;
+        case "-target":
+          if (remaining.hasNext()) {
+            target = remaining.next();
+            release = null;
+          }
+          return true;
+        case "--release":
+          if (remaining.hasNext()) {
+            release = remaining.next();
+            source = null;
+            target = null;
+          }
+          return true;
+        case "--add-exports":
+        case "--add-opens":
+        case "--add-modules":
+          if (remaining.hasNext()) {
+            modular.add(option);
+            modular.add(remaining.next());
+          }
+          return true;
+        default: // fall out
+      }
+      if (option.startsWith("--release=")) {
+        release = option.substring("--release=".length());
+        source = null;
+        target = null;
+        return true;
+      }
+      if (option.startsWith("--add-exports=")
+          || option.startsWith("--add-opens=")
+          || option.startsWith("--add-modules=")) {
+        modular.add(option);
+        return true;
+      }
+      return false;
+    }
+
+    private void addModular(List<String> normalized) {
+      String value;
+      if (release != null) {
+        value = release;
+      } else if (target != null) {
+        value = target;
+      } else {
+        return;
+      }
+      boolean hasPrefix = value.startsWith("1.");
+      Integer version = Ints.tryParse(hasPrefix ? value.substring("1.".length()) : value);
+      if (version == null) {
+        return;
+      }
+      if (version > 8) {
+        normalized.addAll(modular);
+      }
+    }
+
+    @Override
+    public void normalize(List<String> normalized) {
+      addModular(normalized);
+      if (release != null) {
+        normalized.add("--release");
+        normalized.add(release);
+      } else {
+        if (source != null) {
+          normalized.add("-source");
+          normalized.add(source);
+        }
+        if (target != null) {
+          normalized.add("-target");
+          normalized.add(target);
+        }
+      }
+    }
+  }
+
+  /**
+   * Parse an option that starts with {@code -Werror:} into a bunch of werroropts. We silently drop
+   * werroropts that would disable any warnings that we turn into errors by default (treating them
+   * like invalid werroropts).
+   */
+  private static final class WErrorOptionNormalizer implements JavacOptionNormalizer {
+
+    private final WerrorCustomOption.Builder builder;
+
+    WErrorOptionNormalizer(ImmutableList<String> warningsAsErrorsDefault) {
+      builder = new WerrorCustomOption.Builder(warningsAsErrorsDefault);
+    }
+
+    @Override
+    public boolean processOption(String option, Iterator<String> remaining) {
+      if (option.startsWith("-Werror:")) {
+        builder.process(option);
+        return true;
+      }
+      if (option.equals("-Werror")) {
+        builder.all();
+        return true;
+      }
+      return false;
+    }
+
+    @Override
+    public void normalize(List<String> normalized) {
+      String flag = builder.build().toString();
+      if (!flag.isEmpty()) {
+        normalized.add(flag);
+      }
+    }
+  }
+
+  /**
+   * Normalizer for {@code -parameters}, which allows the (non-standard) flag {@code
+   * -XDnoparameters} to disable it based on which option appears last in the params list.
+   */
+  static final class ParameterOptionNormalizer implements JavacOptionNormalizer {
+
+    private static final String PARAMETERS = "-parameters";
+    private boolean parameters = false;
+
+    @Override
+    public boolean processOption(String option, Iterator<String> remaining) {
+      switch (option) {
+        case "-XDnoparameters":
+          parameters = false;
+          return true;
+        case PARAMETERS:
+          parameters = true;
+          return true;
+        default:
+          return false;
+      }
+    }
+
+    @Override
+    public void normalize(List<String> normalized) {
+      if (parameters) {
+        normalized.add(PARAMETERS);
+      }
+    }
+  }
+
+  private final ImmutableList<JavacOptionNormalizer> normalizers;
+
+  JavacOptions(ImmutableList<JavacOptionNormalizer> normalizers) {
+    this.normalizers = normalizers;
+  }
+
+  /**
    * Outputs a reasonably normalized javac option list.
    *
    * @param javacopts the raw javac option list to cleanup
-   * @param normalizers the list of normalizers to apply
    * @return a new cleaned up javac option list
    */
-  public static List<String> normalizeOptionsWithNormalizers(List<String> javacopts,
-        JavacOptionNormalizer... normalizers) {
+  public List<String> normalize(List<String> javacopts) {
     List<String> normalized = new ArrayList<>();
 
-    for (JavacOptionNormalizer normalizer : normalizers) {
-      normalizer.start();
-    }
-
-    for (String opt : javacopts) {
+    Iterator<String> it = javacopts.iterator();
+    while (it.hasNext()) {
+      String opt = it.next();
       boolean found = false;
       for (JavacOptionNormalizer normalizer : normalizers) {
-        if (normalizer.processOption(opt)) {
+        if (normalizer.processOption(opt, it)) {
           found = true;
           break;
         }
@@ -222,13 +421,28 @@ public final class JavacOptions {
   }
 
   /**
-   * A wrapper around {@ref #normalizeOptionsWithNormalizers(List, JavacOptionNormalizer...)} to use
-   * {@link XlintOptionNormalizer} as default normalizer.
+   * Outputs a reasonably normalized javac option list.
    *
-   * <p>The -Xlint option list has up to one each of a -Xlint* basis flag followed by a
-   * -Xlint:xxx,yyy,zzz add flag followed by a -Xlint:-xxx,-yyy,-zzz minus flag.
+   * @param javacopts the raw javac option list to cleanup
+   * @param normalizers the list of normalizers to apply
+   * @return a new cleaned up javac option list
    */
-  public static List<String> normalizeOptions(List<String> javacopts) {
-    return normalizeOptionsWithNormalizers(javacopts, XLINT_OPTION_NORMALIZER);
+  public static List<String> normalizeOptionsWithNormalizers(
+      List<String> javacopts, JavacOptionNormalizer... normalizers) {
+    return new JavacOptions(ImmutableList.copyOf(normalizers)).normalize(javacopts);
+  }
+
+  /**
+   * Creates a {@link JavacOptions} normalizer that will ensure the given set of lint categories are
+   * enabled as errors, overriding any user-provided configuration for those options.
+   */
+  public static JavacOptions createWithWarningsAsErrorsDefault(
+      ImmutableList<String> warningsAsErrorsDefault) {
+    return new JavacOptions(
+        ImmutableList.of(
+            new XlintOptionNormalizer(warningsAsErrorsDefault),
+            new WErrorOptionNormalizer(warningsAsErrorsDefault),
+            new ReleaseOptionNormalizer(),
+            new ParameterOptionNormalizer()));
   }
 }

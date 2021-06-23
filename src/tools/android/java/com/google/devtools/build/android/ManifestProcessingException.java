@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,10 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.android;
 
-/**
- * Indicates an error parsing or modifying an AndroidManifest.xml.
- */
-public class ManifestProcessingException extends Exception {
+/** Indicates an error parsing or modifying an AndroidManifest.xml. */
+public class ManifestProcessingException extends RuntimeException {
 
   public ManifestProcessingException() {
     super();
@@ -24,5 +22,9 @@ public class ManifestProcessingException extends Exception {
 
   public ManifestProcessingException(String message) {
     super(message);
+  }
+
+  public ManifestProcessingException(Exception e) {
+    super(e);
   }
 }

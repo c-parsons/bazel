@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,18 +15,19 @@ package com.google.devtools.build.lib.rules.test;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.test.TestTagsProvider;
+import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.TestTargetUtils;
 import com.google.devtools.build.lib.packages.Type;
-import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.util.Pair;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -37,18 +38,20 @@ import java.util.List;
 public class TestSuite implements RuleConfiguredTargetFactory {
 
   @Override
-  public ConfiguredTarget create(RuleContext ruleContext) {
+  public ConfiguredTarget create(RuleContext ruleContext)
+      throws InterruptedException, RuleErrorException, ActionConflictException {
     checkTestsAndSuites(ruleContext, "tests");
     if (ruleContext.hasErrors()) {
       return null;
     }
 
     //
-    //  CAUTION!  Keep this logic consistent with lib.query2.TestsExpression!
+    //  CAUTION!  Keep this logic consistent with lib.query2.TestsFunction!
     //
 
-    List<String> tagsAttribute = new ArrayList<>(
-        ruleContext.attributes().get("tags", Type.STRING_LIST));
+    List<String> tagsAttribute =
+        new ArrayList<>(ruleContext.attributes().get("tags", Type.STRING_LIST));
+    // TODO(ulfjack): This is inconsistent with the other places that do test_suite expansion.
     tagsAttribute.remove("manual");
     Pair<Collection<String>, Collection<String>> requiredExcluded =
         TestTargetUtils.sortTagsBySense(tagsAttribute);
@@ -62,10 +65,11 @@ public class TestSuite implements RuleConfiguredTargetFactory {
           Iterables.concat(
               getPrerequisites(ruleContext, "tests"),
               getPrerequisites(ruleContext, "$implicit_tests"))) {
-      if (dep.getProvider(TestProvider.class) != null) {
-        List<String> tags = dep.getProvider(TestProvider.class).getTestTags();
+      if (dep.getProvider(TestTagsProvider.class) != null) {
+        // getTestTags maps to Rule.getRuleTags.
+        List<String> tags = dep.getProvider(TestTagsProvider.class).getTestTags();
         if (!TestTargetUtils.testMatchesFilters(
-            tags, requiredExcluded.first, requiredExcluded.second, true)) {
+            tags, requiredExcluded.first, requiredExcluded.second)) {
           // This test does not match our filter. Ignore it.
           continue;
         }
@@ -73,7 +77,8 @@ public class TestSuite implements RuleConfiguredTargetFactory {
       directTestsAndSuitesBuilder.add(dep);
     }
 
-    Runfiles runfiles = new Runfiles.Builder(ruleContext.getWorkspaceName())
+    Runfiles runfiles = new Runfiles.Builder(
+        ruleContext.getWorkspaceName(), ruleContext.getConfiguration().legacyExternalRunfiles())
         .addTargets(directTestsAndSuitesBuilder, RunfilesProvider.DATA_RUNFILES)
         .build();
 
@@ -86,22 +91,22 @@ public class TestSuite implements RuleConfiguredTargetFactory {
 
   private Iterable<? extends TransitiveInfoCollection> getPrerequisites(
       RuleContext ruleContext, String attributeName) {
-    if (ruleContext.attributes().has(attributeName, Type.LABEL_LIST)) {
-      return ruleContext.getPrerequisites(attributeName, Mode.TARGET);
+    if (ruleContext.attributes().has(attributeName, BuildType.LABEL_LIST)) {
+      return ruleContext.getPrerequisites(attributeName);
     } else {
       return ImmutableList.<TransitiveInfoCollection>of();
     }
   }
 
   private void checkTestsAndSuites(RuleContext ruleContext, String attributeName) {
-    if (!ruleContext.attributes().has(attributeName, Type.LABEL_LIST)) {
+    if (!ruleContext.attributes().has(attributeName, BuildType.LABEL_LIST)) {
       return;
     }
-    for (TransitiveInfoCollection dep : ruleContext.getPrerequisites(attributeName, Mode.TARGET)) {
+    for (TransitiveInfoCollection dep : ruleContext.getPrerequisites(attributeName)) {
       // TODO(bazel-team): Maybe convert the TransitiveTestsProvider into an inner interface.
       TransitiveTestsProvider provider = dep.getProvider(TransitiveTestsProvider.class);
-      TestProvider testProvider = dep.getProvider(TestProvider.class);
-      if (provider == null && testProvider == null) {
+      TestTagsProvider tagsProvider = dep.getProvider(TestTagsProvider.class);
+      if (provider == null && tagsProvider == null) {
         ruleContext.attributeError(attributeName,
             "expecting a test or a test_suite rule but '" + dep.getLabel() + "' is not one");
       }

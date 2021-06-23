@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,41 +13,33 @@
 // limitations under the License.
 package com.google.devtools.build.lib.buildtool;
 
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSortedSet;
-import com.google.devtools.build.lib.Constants;
-import com.google.devtools.build.lib.analysis.BuildView;
-import com.google.devtools.build.lib.analysis.OutputGroupProvider;
+import com.google.devtools.build.lib.analysis.AnalysisOptions;
+import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
-import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
+import com.google.devtools.build.lib.analysis.config.BuildOptions;
+import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
-import com.google.devtools.build.lib.pkgcache.LoadingPhaseRunner;
-import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
-import com.google.devtools.build.lib.runtime.BlazeCommandEventHandler;
+import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
+import com.google.devtools.build.lib.pkgcache.LoadingOptions;
+import com.google.devtools.build.lib.pkgcache.PackageOptions;
+import com.google.devtools.build.lib.runtime.KeepGoingOption;
+import com.google.devtools.build.lib.runtime.LoadingPhaseThreadsOption;
+import com.google.devtools.build.lib.runtime.UiOptions;
 import com.google.devtools.build.lib.util.OptionsUtils;
 import com.google.devtools.build.lib.util.io.OutErr;
-import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.common.options.Converter;
-import com.google.devtools.common.options.Converters;
-import com.google.devtools.common.options.Converters.RangeConverter;
-import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionsBase;
-import com.google.devtools.common.options.OptionsClassProvider;
-import com.google.devtools.common.options.OptionsParsingException;
+import com.google.devtools.common.options.OptionsParsingResult;
 import com.google.devtools.common.options.OptionsProvider;
-
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ExecutionException;
-import java.util.regex.Pattern;
 
 /**
  * A BuildRequest represents a single invocation of the build tool by a user.
@@ -55,228 +47,108 @@ import java.util.regex.Pattern;
  * configuration, a pair of output/error streams, and additional options such
  * as --keep_going, --jobs, etc.
  */
-public class BuildRequest implements OptionsClassProvider {
-  private static final String DEFAULT_SYMLINK_PREFIX_MARKER = "...---:::@@@DEFAULT@@@:::--...";
+public class BuildRequest implements OptionsProvider {
+  public static final String VALIDATION_ASPECT_NAME = "ValidateTarget";
 
-  /**
-   * A converter for symlink prefixes that defaults to {@code Constants.PRODUCT_NAME} and a
-   * minus sign if the option is not given.
-   *
-   * <p>Required because you cannot specify a non-constant value in annotation attributes.
-   */
-  public static class SymlinkPrefixConverter implements Converter<String> {
-    @Override
-    public String convert(String input) throws OptionsParsingException {
-      return input.equals(DEFAULT_SYMLINK_PREFIX_MARKER)
-          ? Constants.PRODUCT_NAME + "-"
-          : input;
-    }
+  private static final ImmutableList<Class<? extends OptionsBase>> MANDATORY_OPTIONS =
+      ImmutableList.of(
+          BuildRequestOptions.class,
+          PackageOptions.class,
+          BuildLanguageOptions.class,
+          LoadingOptions.class,
+          AnalysisOptions.class,
+          ExecutionOptions.class,
+          KeepGoingOption.class,
+          LoadingPhaseThreadsOption.class);
 
-    @Override
-    public String getTypeDescription() {
-      return "a string";
-    }
+  /** Returns a new Builder instance. */
+  public static Builder builder() {
+    return new Builder();
   }
 
-  /**
-   * Options interface--can be used to parse command-line arguments.
-   *
-   * See also ExecutionOptions; from the user's point of view, there's no
-   * qualitative difference between these two sets of options.
-   */
-  public static class BuildRequestOptions extends OptionsBase {
+  /** A Builder class to help create instances of BuildRequest. */
+  public static final class Builder {
+    private UUID id;
+    private OptionsParsingResult options;
+    private OptionsParsingResult startupOptions;
+    private String commandName;
+    private OutErr outErr;
+    private List<String> targets;
+    private long startTimeMillis; // milliseconds since UNIX epoch.
+    private boolean needsInstrumentationFilter;
+    private boolean runTests;
+    private boolean checkForActionConflicts = true;
 
-    /* "Execution": options related to the execution of a build: */
+    private Builder() {}
 
-    @Option(name = "jobs",
-            abbrev = 'j',
-            defaultValue = "200",
-            category = "strategy",
-            help = "The number of concurrent jobs to run. "
-                + "0 means build sequentially. Values above " + MAX_JOBS
-                + " are not allowed.")
-    public int jobs;
+    public Builder setId(UUID id) {
+      this.id = id;
+      return this;
+    }
 
-    @Option(name = "progress_report_interval",
-            defaultValue = "0",
-            category = "verbosity",
-            converter = ProgressReportIntervalConverter.class,
-            help = "The number of seconds to wait between two reports on"
-                + " still running jobs.  The default value 0 means to use"
-                + " the default 10:30:60 incremental algorithm.")
-    public int progressReportInterval;
+    public Builder setOptions(OptionsParsingResult options) {
+      this.options = options;
+      return this;
+    }
 
-    @Option(name = "explain",
-            defaultValue = "null",
-            category = "verbosity",
-            converter = OptionsUtils.PathFragmentConverter.class,
-            help = "Causes Blaze to explain each executed step of the build. "
-            + "The explanation is written to the specified log file.")
-    public PathFragment explanationPath;
+    public Builder setStartupOptions(OptionsParsingResult startupOptions) {
+      this.startupOptions = startupOptions;
+      return this;
+    }
 
-    @Option(name = "verbose_explanations",
-            defaultValue = "false",
-            category = "verbosity",
-            help = "Increases the verbosity of the explanations issued if --explain is enabled. "
-            + "Has no effect if --explain is not enabled.")
-    public boolean verboseExplanations;
+    public Builder setCommandName(String commandName) {
+      this.commandName = commandName;
+      return this;
+    }
 
-    @Option(name = "output_filter",
-        converter = Converters.RegexPatternConverter.class,
-        defaultValue = "null",
-        category = "flags",
-        help = "Only shows warnings for rules with a name matching the provided regular "
-            + "expression.")
-    public Pattern outputFilter;
+    public Builder setOutErr(OutErr outErr) {
+      this.outErr = outErr;
+      return this;
+    }
 
-    @Deprecated
-    @Option(name = "dump_makefile",
-            defaultValue = "false",
-            category = "undocumented",
-            help = "this flag has no effect.")
-    public boolean dumpMakefile;
+    public Builder setTargets(List<String> targets) {
+      this.targets = targets;
+      return this;
+    }
 
-    @Deprecated
-    @Option(name = "dump_action_graph",
-        defaultValue = "false",
-        category = "undocumented",
-        help = "this flag has no effect.")
+    public Builder setStartTimeMillis(long startTimeMillis) {
+      this.startTimeMillis = startTimeMillis;
+      return this;
+    }
 
-    public boolean dumpActionGraph;
+    public Builder setNeedsInstrumentationFilter(boolean needsInstrumentationFilter) {
+      this.needsInstrumentationFilter = needsInstrumentationFilter;
+      return this;
+    }
 
-    @Deprecated
-    @Option(name = "dump_action_graph_for_package",
-        allowMultiple = true,
-        defaultValue = "",
-        category = "undocumented",
-        help = "this flag has no effect.")
-    public List<String> dumpActionGraphForPackage = new ArrayList<>();
+    public Builder setRunTests(boolean runTests) {
+      this.runTests = runTests;
+      return this;
+    }
 
-    @Deprecated
-    @Option(name = "dump_action_graph_with_middlemen",
-        defaultValue = "true",
-        category = "undocumented",
-        help = "this flag has no effect.")
-    public boolean dumpActionGraphWithMiddlemen;
+    public Builder setCheckforActionConflicts(boolean checkForActionConflicts) {
+      this.checkForActionConflicts = checkForActionConflicts;
+      return this;
+    }
 
-    @Deprecated
-    @Option(name = "dump_providers",
-        defaultValue = "false",
-        category = "undocumented",
-        help = "This is a no-op.")
-    public boolean dumpProviders;
-
-    @Deprecated
-    @Option(name = "dump_targets",
-            defaultValue = "null",
-            category = "undocumented",
-        help = "this flag has no effect.")
-    public String dumpTargets;
-
-    @Deprecated
-    @Option(name = "dump_host_deps",
-        defaultValue = "true",
-        category = "undocumented",
-        help = "Deprecated")
-    public boolean dumpHostDeps;
-
-    @Deprecated
-    @Option(name = "dump_to_stdout",
-        defaultValue = "false",
-        category = "undocumented",
-        help = "Deprecated")
-    public boolean dumpToStdout;
-
-    @Option(name = "analyze",
-            defaultValue = "true",
-            category = "undocumented",
-            help = "Execute the analysis phase; this is the usual behaviour. "
-                + "Specifying --noanalyze causes the build to stop before starting the "
-                + "analysis phase, returning zero iff the package loading completed "
-                + "successfully; this mode is useful for testing.")
-    public boolean performAnalysisPhase;
-
-    @Option(name = "build",
-            defaultValue = "true",
-            category = "what",
-            help = "Execute the build; this is the usual behaviour. "
-            + "Specifying --nobuild causes the build to stop before executing the "
-            + "build actions, returning zero iff the package loading and analysis "
-            + "phases completed successfully; this mode is useful for testing "
-            + "those phases.")
-    public boolean performExecutionPhase;
-
-    @Option(name = "output_groups",
-        converter = Converters.CommaSeparatedOptionListConverter.class,
-        allowMultiple = true,
-        defaultValue = "",
-        category = "undocumented",
-        help = "Specifies, which output groups of the top-level target to build.")
-    public List<String> outputGroups;
-
-    @Option(name = "show_result",
-            defaultValue = "1",
-            category = "verbosity",
-            help = "Show the results of the build.  For each "
-            + "target, state whether or not it was brought up-to-date, and if "
-            + "so, a list of output files that were built.  The printed files "
-            + "are convenient strings for copy+pasting to the shell, to "
-            + "execute them.\n"
-            + "This option requires an integer argument, which "
-            + "is the threshold number of targets above which result "
-            + "information is not printed. "
-            + "Thus zero causes suppression of the message and MAX_INT "
-            + "causes printing of the result to occur always.  The default is one.")
-    public int maxResultTargets;
-
-    @Option(name = "announce",
-            defaultValue = "false",
-            category = "verbosity",
-            help = "Deprecated. No-op.",
-            deprecationWarning = "This option is now deprecated and is a no-op")
-    public boolean announce;
-
-    @Option(name = "symlink_prefix",
-        defaultValue = DEFAULT_SYMLINK_PREFIX_MARKER,
-        converter = SymlinkPrefixConverter.class,
-        category = "misc",
-        help = "The prefix that is prepended to any of the convenience symlinks that are created "
-            + "after a build. If '/' is passed, then no symlinks are created and no warning is "
-            + "emitted."
-        )
-    public String symlinkPrefix;
-
-    @Option(name = "experimental_multi_cpu",
-            converter = Converters.CommaSeparatedOptionListConverter.class,
-            allowMultiple = true,
-            defaultValue = "",
-            category = "semantics",
-            help = "This flag allows specifying multiple target CPUs. If this is specified, "
-                + "the --cpu option is ignored.")
-    public List<String> multiCpus;
-
-    @Option(name = "experimental_check_output_files",
-            defaultValue = "true",
-            category = "undocumented",
-            help = "Check for modifications made to the output files of a build. Consider setting "
-                + "this flag to false to see the effect on incremental build times.")
-    public boolean checkOutputFiles;
-  }
-
-  /**
-   * Converter for progress_report_interval: [0, 3600].
-   */
-  public static class ProgressReportIntervalConverter extends RangeConverter {
-    public ProgressReportIntervalConverter() {
-      super(0, 3600);
+    public BuildRequest build() {
+      return new BuildRequest(
+          commandName,
+          options,
+          startupOptions,
+          targets,
+          outErr,
+          id,
+          startTimeMillis,
+          needsInstrumentationFilter,
+          runTests,
+          checkForActionConflicts);
     }
   }
-
-  private static final int MAX_JOBS = 2000;
-  private static final int JOBS_TOO_HIGH_WARNING = 1000;
 
   private final UUID id;
   private final LoadingCache<Class<? extends OptionsBase>, Optional<OptionsBase>> optionsCache;
+  private final Map<String, Object> starlarkOptions;
 
   /** A human-readable description of all the non-default option settings. */
   private final String optionsDescription;
@@ -290,47 +162,63 @@ public class BuildRequest implements OptionsClassProvider {
   private final OutErr outErr;
   private final List<String> targets;
 
-  private long startTimeMillis = 0; // milliseconds since UNIX epoch.
+  private final long startTimeMillis; // milliseconds since UNIX epoch.
 
-  private boolean runningInEmacs = false;
-  private boolean runTests = false;
+  private final boolean needsInstrumentationFilter;
+  private final boolean runningInEmacs;
+  private final boolean runTests;
+  private final boolean checkForActionConflicts;
 
-  private static final List<Class<? extends OptionsBase>> MANDATORY_OPTIONS = ImmutableList.of(
-          BuildRequestOptions.class,
-          PackageCacheOptions.class,
-          LoadingPhaseRunner.Options.class,
-          BuildView.Options.class,
-          ExecutionOptions.class);
-
-  private BuildRequest(String commandName,
-                       final OptionsProvider options,
-                       final OptionsProvider startupOptions,
-                       List<String> targets,
-                       OutErr outErr,
-                       UUID id,
-                       long startTimeMillis) {
+  private BuildRequest(
+      String commandName,
+      final OptionsParsingResult options,
+      final OptionsParsingResult startupOptions,
+      List<String> targets,
+      OutErr outErr,
+      UUID id,
+      long startTimeMillis,
+      boolean needsInstrumentationFilter,
+      boolean runTests,
+      boolean checkForActionConflicts) {
     this.commandName = commandName;
     this.optionsDescription = OptionsUtils.asShellEscapedString(options);
     this.outErr = outErr;
     this.targets = targets;
     this.id = id;
     this.startTimeMillis = startTimeMillis;
-    this.optionsCache = CacheBuilder.newBuilder()
-        .build(new CacheLoader<Class<? extends OptionsBase>, Optional<OptionsBase>>() {
-          @Override
-          public Optional<OptionsBase> load(Class<? extends OptionsBase> key) throws Exception {
-            OptionsBase result = options.getOptions(key);
-            if (result == null && startupOptions != null) {
-              result = startupOptions.getOptions(key);
-            }
+    this.optionsCache =
+        Caffeine.newBuilder()
+            .build(
+                key -> {
+                  OptionsBase result = options.getOptions(key);
+                  if (result == null && startupOptions != null) {
+                    result = startupOptions.getOptions(key);
+                  }
 
-            return Optional.fromNullable(result);
-          }
-        });
+                  return Optional.fromNullable(result);
+                });
+    this.starlarkOptions = options.getStarlarkOptions();
+    this.needsInstrumentationFilter = needsInstrumentationFilter;
+    this.runTests = runTests;
+    this.checkForActionConflicts = checkForActionConflicts;
 
     for (Class<? extends OptionsBase> optionsClass : MANDATORY_OPTIONS) {
       Preconditions.checkNotNull(getOptions(optionsClass));
     }
+
+    // All this, just to pass a global boolean from the client to the server. :(
+    this.runningInEmacs = options.getOptions(UiOptions.class).runningInEmacs;
+  }
+
+  /**
+   * Since the OptionsProvider interface is used by many teams, this method is String-keyed even
+   * though it should always contain labels for our purposes. Consumers of this method should
+   * probably use the {@link BuildOptions#labelizeStarlarkOptions} method before doing meaningful
+   * work with the results.
+   */
+  @Override
+  public Map<String, Object> getStarlarkOptions() {
+    return starlarkOptions;
   }
 
   /**
@@ -347,23 +235,8 @@ public class BuildRequest implements OptionsClassProvider {
     return commandName;
   }
 
-  /**
-   * Set to true if this build request was initiated by Emacs.
-   * (Certain output formatting may be necessary.)
-   */
-  public void setRunningInEmacs() {
-    runningInEmacs = true;
-  }
-
   boolean isRunningInEmacs() {
     return runningInEmacs;
-  }
-
-  /**
-   * Enables test execution for this build request.
-   */
-  public void setRunTests() {
-    runTests = true;
   }
 
   /**
@@ -392,12 +265,9 @@ public class BuildRequest implements OptionsClassProvider {
   @Override
   @SuppressWarnings("unchecked")
   public <T extends OptionsBase> T getOptions(Class<T> clazz) {
-    try {
-      return (T) optionsCache.get(clazz).orNull();
-    } catch (ExecutionException e) {
-      throw new IllegalStateException(e);
-    }
+    return (T) optionsCache.get(clazz).orNull();
   }
+
 
   /**
    * Returns the set of command-line options specified for this request.
@@ -406,28 +276,35 @@ public class BuildRequest implements OptionsClassProvider {
     return getOptions(BuildRequestOptions.class);
   }
 
-  /**
-   * Returns the set of options related to the loading phase.
-   */
-  public PackageCacheOptions getPackageCacheOptions() {
-    return getOptions(PackageCacheOptions.class);
+  /** Returns the set of options related to the loading phase. */
+  public PackageOptions getPackageOptions() {
+    return getOptions(PackageOptions.class);
   }
 
   /**
    * Returns the set of options related to the loading phase.
    */
-  public LoadingPhaseRunner.Options getLoadingOptions() {
-    return getOptions(LoadingPhaseRunner.Options.class);
+  public LoadingOptions getLoadingOptions() {
+    return getOptions(LoadingOptions.class);
   }
 
   /**
    * Returns the set of command-line options related to the view specified for
    * this request.
    */
-  public BuildView.Options getViewOptions() {
-    return getOptions(BuildView.Options.class);
+  public AnalysisOptions getViewOptions() {
+    return getOptions(AnalysisOptions.class);
   }
 
+  /** Returns the value of the --keep_going option. */
+  public boolean getKeepGoing() {
+    return getOptions(KeepGoingOption.class).keepGoing;
+  }
+
+  /** Returns the value of the --loading_phase_threads option. */
+  int getLoadingPhaseThreadCount() {
+    return getOptions(LoadingPhaseThreadsOption.class).threads;
+  }
   /**
    * Returns the set of execution options specified for this request.
    */
@@ -451,6 +328,10 @@ public class BuildRequest implements OptionsClassProvider {
     return startTimeMillis;
   }
 
+  public boolean needsInstrumentationFilter() {
+    return needsInstrumentationFilter;
+  }
+
   /**
    * Validates the options for this BuildRequest.
    *
@@ -459,26 +340,11 @@ public class BuildRequest implements OptionsClassProvider {
    *
    * @return list of warnings
    */
-  public List<String> validateOptions() throws InvalidConfigurationException {
+  public List<String> validateOptions() {
     List<String> warnings = new ArrayList<>();
-    // Validate "jobs".
-    int jobs = getBuildOptions().jobs;
-    if (jobs < 0 || jobs > MAX_JOBS) {
-      throw new InvalidConfigurationException(String.format(
-          "Invalid parameter for --jobs: %d. Only values 0 <= jobs <= %d are allowed.", jobs,
-          MAX_JOBS));
-    }
-    if (jobs > JOBS_TOO_HIGH_WARNING) {
-      warnings.add(
-          String.format("High value for --jobs: %d. You may run into memory issues", jobs));
-    }
 
     int localTestJobs = getExecutionOptions().localTestJobs;
-    if (localTestJobs < 0) {
-      throw new InvalidConfigurationException(String.format(
-          "Invalid parameter for --local_test_jobs: %d. Only values 0 or greater are "
-              + "allowed.", localTestJobs));
-    }
+    int jobs = getBuildOptions().jobs;
     if (localTestJobs > jobs) {
       warnings.add(
           String.format("High value for --local_test_jobs: %d. This exceeds the value for --jobs: "
@@ -495,46 +361,44 @@ public class BuildRequest implements OptionsClassProvider {
 
   /** Creates a new TopLevelArtifactContext from this build request. */
   public TopLevelArtifactContext getTopLevelArtifactContext() {
+    BuildRequestOptions buildOptions = getBuildOptions();
     return new TopLevelArtifactContext(
         getOptions(ExecutionOptions.class).testStrategy.equals("exclusive"),
-        determineOutputGroups());
-  }
-
-  private ImmutableSortedSet<String> determineOutputGroups() {
-    Set<String> current = new HashSet<>(OutputGroupProvider.DEFAULT_GROUPS);
-
-    for (String outputGroup : getBuildOptions().outputGroups) {
-      if (outputGroup.startsWith("-")) {
-        current.remove(outputGroup.substring(1));
-      } else {
-        current.add(outputGroup);
-      }
-    }
-
-    return ImmutableSortedSet.copyOf(current);
-  }
-
-  public String getSymlinkPrefix() {
-    return getBuildOptions().symlinkPrefix;
+        getOptions(BuildEventProtocolOptions.class).expandFilesets,
+        getOptions(BuildEventProtocolOptions.class).fullyResolveFilesetSymlinks,
+        OutputGroupInfo.determineOutputGroups(
+            buildOptions.outputGroups, validationMode(), /*shouldRunTests=*/ shouldRunTests()));
   }
 
   public ImmutableSortedSet<String> getMultiCpus() {
     return ImmutableSortedSet.copyOf(getBuildOptions().multiCpus);
   }
 
-  public static BuildRequest create(String commandName, OptionsProvider options,
-      OptionsProvider startupOptions,
-      List<String> targets, OutErr outErr, UUID commandId, long commandStartTime) {
-
-    BuildRequest request = new BuildRequest(commandName, options, startupOptions, targets, outErr,
-        commandId, commandStartTime);
-
-    // All this, just to pass a global boolean from the client to the server. :(
-    if (options.getOptions(BlazeCommandEventHandler.Options.class).runningInEmacs) {
-      request.setRunningInEmacs();
+  public ImmutableList<String> getAspects() {
+    ImmutableList.Builder<String> result =
+        ImmutableList.<String>builder().addAll(getBuildOptions().aspects);
+    if (useValidationAspect()) {
+      result.add(VALIDATION_ASPECT_NAME);
     }
-
-    return request;
+    return result.build();
   }
 
+  /** Whether {@value #VALIDATION_ASPECT_NAME} is in use. */
+  public boolean useValidationAspect() {
+    return validationMode() == OutputGroupInfo.ValidationMode.ASPECT;
+  }
+
+  private OutputGroupInfo.ValidationMode validationMode() {
+    BuildRequestOptions buildOptions = getBuildOptions();
+    if (!buildOptions.runValidationActions) {
+      return OutputGroupInfo.ValidationMode.OFF;
+    }
+    return buildOptions.useValidationAspect
+        ? OutputGroupInfo.ValidationMode.ASPECT
+        : OutputGroupInfo.ValidationMode.OUTPUT_GROUP;
+  }
+
+  public boolean getCheckForActionConflicts() {
+    return checkForActionConflicts;
+  }
 }

@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,19 +14,27 @@
 package com.google.devtools.build.lib.analysis.select;
 
 import static com.google.common.truth.Truth.assertThat;
+import static org.junit.Assert.assertThrows;
 
 import com.google.devtools.build.lib.packages.NonconfigurableAttributeMapper;
+import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.Type;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /**
  * Unit tests for {@link NonconfigurableAttributeMapper}.
  */
+@RunWith(JUnit4.class)
 public class NonconfigurableAttributeMapperTest extends AbstractAttributeMapperTest {
 
-  @Override
-  public void setUp() throws Exception {
-    super.setUp();
-    rule = createRule("x", "myrule",
+  private Rule rule;
+
+  @Before
+  public final void createRule() throws Exception {
+    rule = scratchRule("x", "myrule",
         "cc_binary(",
         "    name = 'myrule',",
         "    srcs = ['a', 'b', 'c'],",
@@ -34,19 +42,31 @@ public class NonconfigurableAttributeMapperTest extends AbstractAttributeMapperT
         "  deprecation = \"this rule is deprecated!\")");
   }
 
+  @Test
   public void testGetNonconfigurableAttribute() throws Exception {
-    assertEquals("this rule is deprecated!",
-        NonconfigurableAttributeMapper.of(rule).get("deprecation", Type.STRING));
+    assertThat(NonconfigurableAttributeMapper.of(rule).get("deprecation", Type.STRING))
+        .isEqualTo("this rule is deprecated!");
   }
 
+  @Test
   public void testGetConfigurableAttribute() throws Exception {
-    try {
-      NonconfigurableAttributeMapper.of(rule).get("linkstatic", Type.BOOLEAN);
-      fail("Expected NonconfigurableAttributeMapper to fail on a configurable attribute type");
-    } catch (IllegalStateException e) {
-      // Expected outcome.
-      assertThat(e).hasMessage(
-          "Attribute 'linkstatic' is potentially configurable - not allowed here");
-    }
+    IllegalStateException e =
+        assertThrows(
+            "Expected NonconfigurableAttributeMapper to fail on a configurable attribute type",
+            IllegalStateException.class,
+            () -> NonconfigurableAttributeMapper.of(rule).get("linkstatic", Type.BOOLEAN));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo("Attribute 'linkstatic' is potentially configurable - not allowed here");
+  }
+
+  @Test
+  public void testGet_nonexistentAttribute() throws Exception {
+    IllegalArgumentException e =
+        assertThrows(
+            "Expected NonconfigurableAttributeMapper to fail on nonexistent attribute name",
+            IllegalArgumentException.class,
+            () -> NonconfigurableAttributeMapper.of(rule).get("nonexistent-attr", Type.STRING));
+    assertThat(e).hasMessageThat().contains("No such attribute nonexistent-attr in cc_binary");
   }
 }

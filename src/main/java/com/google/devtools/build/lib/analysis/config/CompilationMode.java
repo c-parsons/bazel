@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,12 +14,14 @@
 package com.google.devtools.build.lib.analysis.config;
 
 import com.google.devtools.common.options.EnumConverter;
+import net.starlark.java.eval.Printer;
+import net.starlark.java.eval.StarlarkValue;
 
-/**
- * This class represents the debug/optimization mode the binaries will be
- * built for.
- */
-public enum CompilationMode {
+/** This class represents the debug/optimization mode the binaries will be built for. */
+// TODO(bazel-team): Implementing StarlarkValue is a workaround until a well-defined Java-Starlark
+// conversion interface has been created. Avoid replicating this workaround.
+// See also https://github.com/bazelbuild/bazel/pull/11347#issuecomment-630260102
+public enum CompilationMode implements StarlarkValue {
 
   // Fast build mode (-g0).
   FASTBUILD("fastbuild"),
@@ -46,5 +48,10 @@ public enum CompilationMode {
     public Converter() {
       super(CompilationMode.class, "compilation mode");
     }
+  }
+
+  @Override
+  public void repr(Printer printer) {
+    printer.append(toString());
   }
 }

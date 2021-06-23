@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright 2015 Google Inc. All rights reserved.
+# Copyright 2015 The Bazel Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ source ${DIR}/testenv.sh || { echo "testenv.sh not found!" >&2; exit 1; }
 : ${COMMAND_ALIASES:=bazel}
 
 # Completion script
-: ${COMPLETION:="$TEST_SRCDIR/scripts/bazel-complete.bash"}
+: ${COMPLETION:="$TEST_SRCDIR/io_bazel/scripts/bazel-complete.bash"}
 
 # Set this to test completion with package path (if enabled)
 : ${PACKAGE_PATH_PREFIX:=}
@@ -68,7 +68,7 @@ expand() {
         #
         # Alias expansion still inserts an extra space after 'blaze',
         # though, hence the following sed.  Not sure why.
-        for i in ${COMMAND_ALIASES[@]}; do
+        for i in "${COMMAND_ALIASES[@]}"; do
           echo "alias $i=\"echo $i'\""
         done
         echo -en "$input'"
@@ -82,7 +82,7 @@ expand() {
 # e.g. assert_expansion 'foo' 'foo_expand' 'flag1=bar;flag2=baz'
 assert_expansion() {
     local prefix=$1 expected=$2 flags=${3:-}
-    for i in ${COMMAND_ALIASES[@]}; do
+    for i in "${COMMAND_ALIASES[@]}"; do
       local nprefix="$i $prefix"
       local nexpected="$i $expected"
       assert_equals "$nexpected" "$(expand "$nprefix\t" "$flags" "/dev/null")"
@@ -99,8 +99,8 @@ assert_expansion() {
 # in STDERR receiving a string containing regex unexpected-error.
 assert_expansion_error_not_contains() {
   local prefix=$1 not_expected=$2 flags=${3:-}
-  local temp_file=$(mktemp -t tmp.stderr.XXXXXX)
-  for i in ${COMMAND_ALIASES[@]}; do
+  local temp_file="$(mktemp "${TEST_TMPDIR}/tmp.stderr.XXXXXX")"
+  for i in "${COMMAND_ALIASES[@]}"; do
     local nprefix="$i "
     expand "$nprefix\t" "$flags" "$temp_file" > /dev/null
     assert_not_contains "$not_expected" "$temp_file"
@@ -170,8 +170,10 @@ source ${COMPLETION}
 assert_expansion_function() {
   local ws=${PWD}
   local function="$1" displacement="$2" type="$3" expected="$4" current="$5"
-  assert_equals "$(echo -e "${expected}")" \
-      "$(eval "_bazel__${function} \"${ws}\" \"${displacement}\" \"${current}\" \"${type}\"")"
+  disable_errexit
+  local actual_result=$(eval "_bazel__${function} \"${ws}\" \"${displacement}\" \"${current}\" \"${type}\"" | sort)
+  enable_errexit
+  assert_equals "$(echo -ne "${expected}")" "${actual_result}"
 }
 
 test_expand_rules_in_package() {
@@ -194,7 +196,7 @@ test_expand_rules_in_package() {
 
     # label should match test and non-test rules
     assert_expansion_function "expand_rules_in_package" "" label \
-    'token_bucket_test \ntoken_bucket_binary ' \
+    'token_bucket_binary \ntoken_bucket_test ' \
     'video/streamer2:token_bucket_'
     assert_expansion_function "expand_rules_in_package" "" label \
     'stuff ' 'video/streamer2/stuff:s'
@@ -232,7 +234,7 @@ test_expand_rules_in_package() {
     # with BAZEL_COMPLETION_ALLOW_TESTS_FOR_RUN set.
     BAZEL_COMPLETION_ALLOW_TESTS_FOR_RUN=true \
     assert_expansion_function "expand_rules_in_package" "" label-bin \
-    'token_bucket_test \ntoken_bucket_binary ' 'video/streamer2:to'
+    'token_bucket_binary \ntoken_bucket_test ' 'video/streamer2:to'
 
     # Test the label-bin expands for test rules, with
     # BAZEL_COMPLETION_ALLOW_TESTS_FOR_RUN set.
@@ -301,7 +303,7 @@ test_expand_package_name() {
 
     # label-package
     assert_expansion_function "expand_package_name" "" "label-package" \
-    "//video/streamer2/stuff/\n//video/streamer2/stuff " \
+    "//video/streamer2/stuff \n//video/streamer2/stuff/" \
     "//video/streamer2/stu"
     assert_expansion_function "expand_package_name" "" "label-package" \
     "//video/notapackage/" \
@@ -355,7 +357,7 @@ test_complete_pattern() {
       "//video/streamer2/stu"
 
   assert_expansion_function "complete_pattern" "" label-package \
-      "//video/streamer2/stuff/\n//video/streamer2/stuff " \
+      "//video/streamer2/stuff \n//video/streamer2/stuff/" \
       "//video/streamer2/stu"
 
   assert_expansion_function "complete_pattern" "" command \
@@ -390,6 +392,19 @@ test_complete_pattern() {
       '' 'video/streamer2:ta'
   assert_expansion_function "complete_pattern" "video/" label \
       'with_special+_,=-.@~chars ' 'streamer2:with_s'
+
+  # Path expansion
+  if [[ -z $PACKAGE_PATH_PREFIX ]]; then
+      assert_expansion_function "complete_pattern" "" path \
+          "video/streamer2/BUILD \nvideo/streamer2/names/\nvideo/streamer2/stuff/\nvideo/streamer2/testing/" \
+          "video/streamer2/"
+  else
+      # When $PACKAGE_PATH_PREFIX is set, the "stuff" directory will not be in
+      # the same directory as the others, so we have to omit it.
+      assert_expansion_function "complete_pattern" "" path \
+          "video/streamer2/BUILD \nvideo/streamer2/names/\nvideo/streamer2/testing/" \
+          "video/streamer2/"
+  fi
 }
 
 #### TESTS #############################################################
@@ -404,9 +419,9 @@ test_basic_subcommand_expansion() {
                      'shutdown '
 }
 
-test_common_options() {
-    # 'Test common option completion'
-    assert_expansion '--h' \
+test_common_startup_options() {
+    # 'Test common startup option completion'
+    assert_expansion '--hos' \
                      '--host_jvm_'
     assert_expansion '--host_jvm_a' \
                      '--host_jvm_args='
@@ -703,6 +718,22 @@ test_target_expansion_in_package() {
     # (no expansion)
     assert_expansion 'build :s' \
                      'build :s'
+}
+
+test_filename_expansion_after_double_dash() {
+    make_packages
+    assert_expansion 'run :target -- vid' \
+                     'run :target -- video/'
+    assert_expansion 'run :target -- video/st' \
+                     'run :target -- video/streamer2/'
+    assert_expansion 'run :target -- video/streamer2/B' \
+                     'run :target -- video/streamer2/BUILD '
+    assert_expansion 'run :target -- video/streamer2/n' \
+                     'run :target -- video/streamer2/names/'
+
+    # Autocomplete arguments as well.
+    assert_expansion 'run :target -- --arg=video/streamer2/n' \
+                     'run :target -- --arg=video/streamer2/names/'
 }
 
 test_help() {

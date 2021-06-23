@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,11 +14,9 @@
 package com.google.devtools.build.lib.vfs;
 
 import com.google.common.base.Splitter;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-
 import javax.annotation.Nullable;
 
 /**
@@ -37,7 +35,7 @@ public class SearchPath {
       return paths;
     }
     for (String p : SEPARATOR.split(searchPath)) {
-      PathFragment pf = new PathFragment(p);
+      PathFragment pf = PathFragment.create(p);
 
       if (pf.isAbsolute()) {
         paths.add(fs.getPath(pf));
@@ -53,8 +51,8 @@ public class SearchPath {
    */
   @Nullable
   public static Path which(List<Path> searchPath, String exe) {
-    PathFragment fragment = new PathFragment(exe);
-    if (fragment.segmentCount() != 1 || fragment.isAbsolute()) {
+    PathFragment fragment = PathFragment.create(exe);
+    if (fragment.isAbsolute() || !fragment.isSingleSegment()) {
       return null;
     }
 

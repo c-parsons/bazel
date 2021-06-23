@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,45 +14,44 @@
 
 package com.google.devtools.build.lib.actions;
 
+import com.google.common.flogger.GoogleLogger;
+import com.google.devtools.build.lib.server.FailureDetails;
+import com.google.devtools.build.lib.server.FailureDetails.Execution;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import java.io.IOException;
+
 /**
- * An ExecException which is results from an external problem on the user's
+ * An ExecException which reports an issue executing an action due to an external problem on the
  * local system.
  *
- * <p>Note that this is fundamentally different exception then the higher level
- * LocalEnvironmentException, which is thrown from the BuildTool. That exception
- * is thrown when the higher levels of Blaze decide to exit.
- *
- * <p>This exception is thrown when a low level error is encountered in the
- * strategy or client protocol layers.  This does not necessarily mean we will
- * exit; we may just retry the action.
+ * <p>The most common use of this exception is to wrap an "unexpected" {@link IOException} thrown by
+ * an lower-level file system access or local process execution, e.g., failure to create a temporary
+ * directory or denied file system access.
  */
 public class EnvironmentalExecException extends ExecException {
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
-  public EnvironmentalExecException(String message, Throwable cause) {
-    super(message, cause);
+  private final FailureDetail failureDetail;
+
+  public EnvironmentalExecException(IOException cause, FailureDetails.Execution.Code code) {
+    super("unexpected I/O exception", cause);
+    logger.atSevere().withCause(cause).log("Unexpected I/O exception");
+    this.failureDetail =
+        FailureDetail.newBuilder().setExecution(Execution.newBuilder().setCode(code)).build();
   }
 
-  public EnvironmentalExecException(String message) {
-    super(message);
+  public EnvironmentalExecException(Exception cause, FailureDetail failureDetail) {
+    super(failureDetail.getMessage(), cause);
+    this.failureDetail = failureDetail;
   }
 
-  public EnvironmentalExecException(String message, Throwable cause, boolean catastrophe) {
-    super(message, cause, catastrophe);
-  }
-
-  public EnvironmentalExecException(String message, boolean catastrophe) {
-    super(message, catastrophe);
+  public EnvironmentalExecException(FailureDetail failureDetail) {
+    super(failureDetail.getMessage());
+    this.failureDetail = failureDetail;
   }
 
   @Override
-  public ActionExecutionException toActionExecutionException(String messagePrefix,
-        boolean verboseFailures, Action action) {
-    if (verboseFailures) {
-      return new ActionExecutionException(messagePrefix + " failed" + getMessage(), this, action,
-          isCatastrophic());
-    } else {
-      return new ActionExecutionException(messagePrefix + " failed" + getMessage(), action,
-          isCatastrophic());
-    }
+  protected FailureDetail getFailureDetail(String message) {
+    return failureDetail.toBuilder().setMessage(message).build();
   }
 }

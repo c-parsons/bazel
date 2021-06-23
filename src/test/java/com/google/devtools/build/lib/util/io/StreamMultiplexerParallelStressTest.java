@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,11 +14,6 @@
 package com.google.devtools.build.lib.util.io;
 
 import com.google.common.io.ByteStreams;
-
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
-
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,6 +23,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /**
  * Exercise {@link StreamMultiplexer} in a parallel setting and ensure there's
@@ -43,14 +41,12 @@ public class StreamMultiplexerParallelStressTest {
   char[] toughCharsToTry = {'\n', '@', '1', '2', '\0', '0'};
 
   /**
-   * We use a demultiplexer as a simple sanity checker only - that is, we don't
-   * care what the demultiplexer writes, but we are taking advantage of its
-   * built in error checking.
+   * We use a demultiplexer as a simple checker only - that is, we don't care what the demultiplexer
+   * writes, but we are taking advantage of its built in error checking.
    */
-  OutputStream devNull  = ByteStreams.nullOutputStream();
+  OutputStream devNull = ByteStreams.nullOutputStream();
 
-  StreamDemultiplexer demux = new StreamDemultiplexer((byte)'1',
-      devNull, devNull, devNull);
+  StreamDemultiplexer demux = new StreamDemultiplexer((byte) 1, devNull, devNull, devNull);
 
   /**
    * The multiplexer under test.
@@ -100,7 +96,8 @@ public class StreamMultiplexerParallelStressTest {
           case 4:
             out = streams[random.nextInt(3)];
             break;
-          }
+          default: // fall out
+        }
       }
       return null;
     }

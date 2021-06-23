@@ -1,4 +1,4 @@
-// Copyright 2010-2015 Google Inc. All rights reserved.
+// Copyright 2010 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,22 +13,23 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis;
 
+import static com.google.common.truth.Truth.assertThat;
+import static org.junit.Assert.assertThrows;
+
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
-import com.google.devtools.build.lib.syntax.Label;
-import com.google.devtools.build.lib.syntax.Label.SyntaxException;
-import com.google.devtools.build.lib.testutil.Suite;
-import com.google.devtools.build.lib.testutil.TestSpec;
+import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import java.util.Map;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
-/**
- * Tests for {@link LabelExpander}.
- */
-@TestSpec(size = Suite.SMALL_TESTS)
+/** Tests for {@link LabelExpander}. */
+@RunWith(JUnit4.class)
 public class LabelExpanderTest extends BuildViewTestCase {
   /**
    * A dummy target that resolves labels and receives errors.
@@ -71,7 +72,7 @@ public class LabelExpanderTest extends BuildViewTestCase {
    */
   private void collectArtifacts() {
     ImmutableMap.Builder<String, Artifact> builder = ImmutableMap.builder();
-    for (Artifact artifact : getFilesToBuild(dummyTarget)) {
+    for (Artifact artifact : getFilesToBuild(dummyTarget).toList()) {
       builder.put(artifact.getRootRelativePath().toString(), artifact);
     }
     artifactsByName = builder.build();
@@ -88,8 +89,8 @@ public class LabelExpanderTest extends BuildViewTestCase {
   /**
    * Creates fake label in package "foo".
    */
-  private static Label labelFor(String targetName) throws SyntaxException {
-    return Label.create("foo", targetName);
+  private static Label labelFor(String targetName) throws LabelSyntaxException {
+    return Label.create("@//foo", targetName);
   }
 
   /**
@@ -98,8 +99,8 @@ public class LabelExpanderTest extends BuildViewTestCase {
    */
   private void assertExpansion(String expectedResult, String expressionToExpand,
       Map<Label, Iterable<Artifact>> mapping) throws Exception {
-    assertEquals(expectedResult,
-        LabelExpander.expand(expressionToExpand, mapping, dummyTarget.getLabel()));
+    assertThat(LabelExpander.expand(expressionToExpand, mapping, dummyTarget.getLabel()))
+        .isEqualTo(expectedResult);
   }
 
   /**
@@ -115,6 +116,7 @@ public class LabelExpanderTest extends BuildViewTestCase {
   /**
    * Tests that if no mapping is specified, then strings expand to themselves.
    */
+  @Test
   public void testStringExpandsToItselfWhenNoMappingSpecified() throws Exception {
     setupDummy();
     assertExpansion("", null);
@@ -127,6 +129,7 @@ public class LabelExpanderTest extends BuildViewTestCase {
    * Tests that in case of a one-to-one label-to-artifact mapping the expansion
    * produces the expected results.
    */
+  @Test
   public void testExpansion() throws Exception {
     setupDummy();
     assertExpansion("foo/x1", "x1", ImmutableMap.<Label, Iterable<Artifact>>of(
@@ -143,6 +146,7 @@ public class LabelExpanderTest extends BuildViewTestCase {
    * Tests that label extraction works as expected - disallowed label characters
    * are resolved to themselves.
    */
+  @Test
   public void testLabelExtraction() throws Exception {
     setupDummy();
     assertExpansion("(foo/" + allowedChars + ")", "(//foo:" + allowedChars + ")",
@@ -159,31 +163,32 @@ public class LabelExpanderTest extends BuildViewTestCase {
   /**
    * Tests that an exception is thrown when the mapping is not one-to-one.
    */
+  @Test
   public void testThrowsWhenMappingIsNotOneToOne() throws Exception {
     setupDummy();
-    try {
-      LabelExpander.expand("x1", ImmutableMap.<Label, Iterable<Artifact>>of(
-          labelFor("x1"), ImmutableList.<Artifact>of()), dummyTarget.getLabel());
+    assertThrows(
+        LabelExpander.NotUniqueExpansionException.class,
+        () ->
+            LabelExpander.expand(
+                "x1",
+                ImmutableMap.<Label, Iterable<Artifact>>of(
+                    labelFor("x1"), ImmutableList.<Artifact>of()),
+                dummyTarget.getLabel()));
 
-      fail("Expected an exception.");
-    } catch (LabelExpander.NotUniqueExpansionException nuee) {
-      // was expected
-    }
-
-    try {
-      LabelExpander.expand("x1", ImmutableMap.<Label, Iterable<Artifact>>of(
-          labelFor("x1"), ImmutableList.of(artifactFor("x1"), artifactFor("x2"))),
-          dummyTarget.getLabel());
-
-      fail("Expected an exception.");
-    } catch (LabelExpander.NotUniqueExpansionException nuee) {
-      // was expected
-    }
+    assertThrows(
+        LabelExpander.NotUniqueExpansionException.class,
+        () ->
+            LabelExpander.expand(
+                "x1",
+                ImmutableMap.<Label, Iterable<Artifact>>of(
+                    labelFor("x1"), ImmutableList.of(artifactFor("x1"), artifactFor("x2"))),
+                dummyTarget.getLabel()));
   }
 
   /**
    * Tests expanding labels that result in a SyntaxException.
    */
+  @Test
   public void testIllFormedLabels() throws Exception {
     setupDummy();
     assertExpansion("x1:x2:x3", "x1:x2:x3",
@@ -237,6 +242,7 @@ public class LabelExpanderTest extends BuildViewTestCase {
    * possible label). This means that if a label is a substring of another
    * label, it should not be expanded but be treated as part of the longer one.
    */
+  @Test
   public void testLabelIsSubstringOfValidLabel() throws Exception {
     setupDummy();
     assertExpansion("x3=foo/bar/x3", "x3=bar/x3",

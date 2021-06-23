@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,72 +16,67 @@ package com.google.devtools.build.lib.runtime;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.MapMaker;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 import com.google.common.eventbus.AllowConcurrentEvents;
 import com.google.common.eventbus.EventBus;
 import com.google.common.eventbus.Subscribe;
 import com.google.devtools.build.lib.actions.ActionOwner;
-import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.AliasProvider;
 import com.google.devtools.build.lib.analysis.AnalysisFailureEvent;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.LabelAndConfiguration;
 import com.google.devtools.build.lib.analysis.TargetCompleteEvent;
+import com.google.devtools.build.lib.analysis.test.TestResult;
+import com.google.devtools.build.lib.buildtool.BuildResult;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildCompleteEvent;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildInterruptedEvent;
 import com.google.devtools.build.lib.buildtool.buildevent.TestFilteringCompleteEvent;
 import com.google.devtools.build.lib.concurrent.ThreadSafety;
-import com.google.devtools.build.lib.events.ExceptionListener;
-import com.google.devtools.build.lib.rules.test.TestProvider;
-import com.google.devtools.build.lib.rules.test.TestResult;
+import com.google.devtools.build.lib.exec.ExecutionOptions;
+import com.google.devtools.build.lib.runtime.TerminalTestResultNotifier.TestSummaryOptions;
+import com.google.devtools.build.lib.runtime.TestResultAggregator.AggregationPolicy;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.FailureDetails.TestCommand;
+import com.google.devtools.build.lib.server.FailureDetails.TestCommand.Code;
+import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
+import com.google.devtools.build.lib.util.DetailedExitCode;
+import com.google.devtools.build.lib.util.DetailedExitCode.DetailedExitCodeComparator;
 import com.google.devtools.build.lib.view.test.TestStatus.BlazeTestStatus;
-
 import java.util.Collection;
-import java.util.Collections;
-import java.util.Map;
-import java.util.concurrent.ConcurrentMap;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import javax.annotation.Nullable;
 
-/**
- * This class aggregates and reports target-wide test statuses in real-time.
- * It must be public for EventBus invocation.
- */
+/** Aggregates and reports target-wide test statuses in real-time. */
 @ThreadSafety.ThreadSafe
-public class AggregatingTestListener {
-  private final ConcurrentMap<Artifact, TestResult> statusMap = new MapMaker().makeMap();
+public final class AggregatingTestListener {
 
-  private final TestResultAnalyzer analyzer;
+  private static final DetailedExitCode TESTS_FAILED_DETAILED_CODE =
+      DetailedExitCode.of(
+          FailureDetail.newBuilder()
+              .setMessage("tests failed")
+              .setTestCommand(TestCommand.newBuilder().setCode(Code.TESTS_FAILED))
+              .build());
+
+  private final TestSummaryOptions summaryOptions;
+  private final ExecutionOptions executionOptions;
   private final EventBus eventBus;
-  private final EventHandlerPreconditions preconditionHelper;
   private volatile boolean blazeHalted = false;
 
+  // Store information about potential failures in the presence of --nokeep_going or
+  // --notest_keep_going.
+  private boolean skipTargetsOnFailure;
 
-  // summaryLock guards concurrent access to these two collections, which should be kept
-  // synchronized with each other.
-  private final Map<LabelAndConfiguration, TestSummary.Builder> summaries;
-  private final Multimap<LabelAndConfiguration, Artifact> remainingRuns;
-  private final Object summaryLock = new Object();
+  private final ConcurrentHashMap<ConfiguredTargetKey, TestResultAggregator> aggregators;
 
-  public AggregatingTestListener(TestResultAnalyzer analyzer,
-                                 EventBus eventBus,
-                                 ExceptionListener listener) {
-    this.analyzer = analyzer;
+  public AggregatingTestListener(
+      TestSummaryOptions summaryOptions, ExecutionOptions executionOptions, EventBus eventBus) {
+    this.summaryOptions = summaryOptions;
+    this.executionOptions = executionOptions;
     this.eventBus = eventBus;
-    this.preconditionHelper = new EventHandlerPreconditions(listener);
 
-    this.summaries = Maps.newHashMap();
-    this.remainingRuns = HashMultimap.create();
-  }
-
-  /**
-   * @return An unmodifiable copy of the map of test results.
-   */
-  public Map<Artifact, TestResult> getStatusMap() {
-    return ImmutableMap.copyOf(statusMap);
+    this.aggregators = new ConcurrentHashMap<>();
   }
 
   /**
@@ -91,20 +86,25 @@ public class AggregatingTestListener {
   @Subscribe
   @AllowConcurrentEvents
   public void populateTests(TestFilteringCompleteEvent event) {
+    AggregationPolicy policy =
+        new AggregationPolicy(
+            eventBus,
+            executionOptions.testCheckUpToDate,
+            summaryOptions.testVerboseTimeoutWarnings);
     // Add all target runs to the map, assuming 1:1 status artifact <-> result.
-    synchronized (summaryLock) {
-      for (ConfiguredTarget target : event.getTestTargets()) {
-        Iterable<Artifact> statusArtifacts =
-            target.getProvider(TestProvider.class).getTestParams().getTestStatusArtifacts();
-        preconditionHelper.checkState(remainingRuns.putAll(asKey(target), statusArtifacts));
-
-        // And create an empty summary suitable for incremental analysis.
-        // Also has the nice side effect of mapping labels to RuleConfiguredTargets.
-        TestSummary.Builder summary = TestSummary.newBuilder()
-            .setTarget(target)
-            .setStatus(BlazeTestStatus.NO_STATUS);
-        preconditionHelper.checkState(summaries.put(asKey(target), summary) == null);
+    for (ConfiguredTarget target : event.getTestTargets()) {
+      if (AliasProvider.isAlias(target)) {
+        continue;
       }
+      TestResultAggregator aggregator =
+          new TestResultAggregator(
+              target,
+              event.getConfigurationForTarget(target),
+              policy,
+              event.getSkippedTests().contains(target));
+      TestResultAggregator oldAggregator = aggregators.put(asKey(target), aggregator);
+      Preconditions.checkState(
+          oldAggregator == null, "target: %s, values: %s %s", target, oldAggregator, aggregator);
     }
   }
 
@@ -115,80 +115,67 @@ public class AggregatingTestListener {
   @Subscribe
   @AllowConcurrentEvents
   public void testEvent(TestResult result) {
-    Preconditions.checkState(
-        statusMap.put(result.getTestStatusArtifact(), result) == null,
-        "Duplicate result reported for an individual test shard");
-
     ActionOwner testOwner = result.getTestAction().getOwner();
-    LabelAndConfiguration targetLabel = LabelAndConfiguration.of(
-        testOwner.getLabel(), result.getTestAction().getConfiguration());
+    ConfiguredTargetKey configuredTargetKey =
+        ConfiguredTargetKey.builder()
+            .setLabel(testOwner.getLabel())
+            .setConfiguration(result.getTestAction().getConfiguration())
+            .build();
+    aggregators.get(configuredTargetKey).testEvent(result);
+  }
 
-    TestSummary finalTestSummary = null;
-    synchronized (summaryLock) {
-      TestSummary.Builder summary = summaries.get(targetLabel);
-      preconditionHelper.checkNotNull(summary);
-      if (!remainingRuns.remove(targetLabel, result.getTestStatusArtifact())) {
-        // This can happen if a buildCompleteEvent() was processed before this event reached us.
-        // This situation is likely to happen if --notest_keep_going is set with multiple targets.
-        return;
-      }
-     
-      summary = analyzer.incrementalAnalyze(summary, result);
-
-      // If all runs are processed, the target is finished and ready to report.
-      if (!remainingRuns.containsKey(targetLabel)) {
-        finalTestSummary = summary.build();
-      }
-    }
-
-    // Report finished targets.
-    if (finalTestSummary != null) {
-      eventBus.post(finalTestSummary);
+  private void targetFailure(ConfiguredTargetKey configuredTargetKey) {
+    TestResultAggregator aggregator = aggregators.get(configuredTargetKey);
+    if (aggregator != null) {
+      aggregator.targetFailure(blazeHalted, skipTargetsOnFailure);
     }
   }
 
-  private void targetFailure(LabelAndConfiguration label) {
-    TestSummary finalSummary;
-    synchronized (summaryLock) {
-      if (!remainingRuns.containsKey(label)) {
-        // Blaze does not guarantee that BuildResult.getSuccessfulTargets() and posted TestResult
-        // events are in sync. Thus, it is possible that a test event was posted, but the target is
-        // not present in the set of successful targets.
-        return;
-      }
-
-      TestSummary.Builder summary = summaries.get(label);
-      if (summary == null) {
-        // Not a test target; nothing to do.
-        return;
-      }
-      finalSummary = analyzer.markUnbuilt(summary, blazeHalted).build();
-
-      // These are never going to run; removing them marks the target complete.
-      remainingRuns.removeAll(label);
+  private void targetSkipped(ConfiguredTargetKey configuredTargetKey) {
+    TestResultAggregator aggregator = aggregators.get(configuredTargetKey);
+    if (aggregator != null) {
+      aggregator.targetSkipped();
     }
-    eventBus.post(finalSummary);
   }
 
   @VisibleForTesting
   void buildComplete(
-      Collection<ConfiguredTarget> actualTargets, Collection<ConfiguredTarget> successfulTargets) {
+      Collection<ConfiguredTarget> actualTargets,
+      Collection<ConfiguredTarget> skippedTargets,
+      Collection<ConfiguredTarget> successfulTargets) {
     if (actualTargets == null || successfulTargets == null) {
       return;
     }
 
-    for (ConfiguredTarget target: Sets.difference(
-        ImmutableSet.copyOf(actualTargets), ImmutableSet.copyOf(successfulTargets))) {
+    ImmutableSet<ConfiguredTarget> nonSuccessfulTargets =
+        Sets.difference(ImmutableSet.copyOf(actualTargets), ImmutableSet.copyOf(successfulTargets))
+            .immutableCopy();
+    for (ConfiguredTarget target :
+        Sets.difference(
+            ImmutableSet.copyOf(nonSuccessfulTargets), ImmutableSet.copyOf(skippedTargets))) {
+      if (AliasProvider.isAlias(target)) {
+        continue;
+      }
       targetFailure(asKey(target));
+    }
+
+    for (ConfiguredTarget target : skippedTargets) {
+      if (AliasProvider.isAlias(target)) {
+        continue;
+      }
+      targetSkipped(asKey(target));
     }
   }
 
   @Subscribe
   public void buildCompleteEvent(BuildCompleteEvent event) {
-    if (event.getResult().wasCatastrophe()) {
+    BuildResult result = event.getResult();
+    if (result.wasCatastrophe()) {
       blazeHalted = true;
     }
-    buildComplete(event.getResult().getActualTargets(), event.getResult().getSuccessfulTargets());
+    skipTargetsOnFailure = result.getStopOnFirstFailure();
+    buildComplete(
+        result.getActualTargets(), result.getSkippedTargets(), result.getSuccessfulTargets());
   }
 
   @Subscribe
@@ -210,46 +197,119 @@ public class AggregatingTestListener {
   @AllowConcurrentEvents
   public void targetComplete(TargetCompleteEvent event) {
     if (event.failed()) {
-      targetFailure(new LabelAndConfiguration(event.getTarget()));
+      targetFailure(event.getConfiguredTargetKey());
     }
   }
 
   /**
-   * Returns the known aggregate results for the given target at the current moment.
+   * Prints out the results of the given tests, and returns a {@link DetailedExitCode} summarizing
+   * those test results. Posts any targets which weren't already completed by the listener to the
+   * EventBus. Reports all targets on the console via the given notifier. Run at the end of the
+   * build, run only once.
+   *
+   * @param testTargets The list of targets being run
+   * @param validatedTargets targets with ValidateTarget aspect success or null if aspect not used
+   * @param notifier A console notifier to echo results to.
+   * @return true if all the tests passed, else false
    */
-  public TestSummary.Builder getCurrentSummary(ConfiguredTarget target) {
-    synchronized (summaryLock) {
-      return summaries.get(asKey(target));
+  public DetailedExitCode differentialAnalyzeAndReport(
+      Collection<ConfiguredTarget> testTargets,
+      Collection<ConfiguredTarget> skippedTargets,
+      @Nullable ImmutableSet<ConfiguredTargetKey> validatedTargets,
+      TestResultNotifier notifier) {
+    Preconditions.checkNotNull(testTargets);
+    Preconditions.checkNotNull(notifier);
+
+    // The natural ordering of the summaries defines their output order.
+    Set<TestSummary> summaries = Sets.newTreeSet();
+
+    int totalRun = 0; // Number of targets running at least one non-cached test.
+    int passCount = 0;
+
+    DetailedExitCode systemFailure = null;
+    for (ConfiguredTarget testTarget : testTargets) {
+      TestSummary summary;
+      if (AliasProvider.isAlias(testTarget)) {
+        ConfiguredTargetKey actualKey =
+            ConfiguredTargetKey.builder()
+                .setLabel(testTarget.getLabel())
+                .setConfigurationKey(testTarget.getConfigurationKey())
+                .build();
+        TestResultAggregator aggregator = aggregators.get(actualKey);
+        TestSummary.Builder summaryBuilder = TestSummary.newBuilder(testTarget);
+        summaryBuilder.mergeFrom(aggregator.aggregateAndReportSummary(skipTargetsOnFailure));
+        summary = summaryBuilder.build();
+      } else {
+        TestResultAggregator aggregator = aggregators.get(asKey(testTarget));
+        summary = aggregator.aggregateAndReportSummary(skipTargetsOnFailure);
+      }
+
+      if (validatedTargets != null
+          && summary.getStatus() != BlazeTestStatus.NO_STATUS
+          && !validatedTargets.contains(asKey(testTarget))) {
+        // Approximate what targetFailure() would do for test targets that failed validation for
+        // the purposes of printing test results to console only. Note that absent -k,
+        // targetFailure() ends up marking one test as FAILED_TO_BUILD before buildComplete() marks
+        // the remaining targets NO_STATUS. While we could approximate that, for simplicity, we
+        // just use NO_STATUS for all tests with failed validations for simplicity here (absent -k).
+        // Events published on BEP are not affected by this, but validation failures are published
+        // as separate events and are additionally accounted in TargetSummary BEP messages.
+        TestSummary.Builder summaryBuilder = TestSummary.newBuilder(summary.getTarget());
+        summaryBuilder.mergeFrom(summary);
+        summaryBuilder.setStatus(
+            skipTargetsOnFailure
+                ? BlazeTestStatus.NO_STATUS
+                : TestResultAggregator.aggregateStatus(
+                    summary.getStatus(), BlazeTestStatus.FAILED_TO_BUILD));
+        summary = summaryBuilder.build();
+      }
+
+      summaries.add(summary);
+
+      // Finished aggregating; build the final console output.
+      if (summary.actionRan()) {
+        totalRun++;
+      }
+
+      if (TestResult.isBlazeTestStatusPassed(summary.getStatus())) {
+        passCount++;
+      }
+
+      systemFailure =
+          DetailedExitCodeComparator.chooseMoreImportantWithFirstIfTie(
+              systemFailure, summary.getSystemFailure());
     }
-  }
 
-  /**
-   * Returns all test status artifacts associated with a given target
-   * whose runs have yet to finish.
-   */
-  public Collection<Artifact> getIncompleteRuns(ConfiguredTarget target) {
-    synchronized (summaryLock) {
-      return Collections.unmodifiableCollection(remainingRuns.get(asKey(target)));
+    int summarySize = summaries.size();
+    int testTargetsSize = testTargets.size();
+    Preconditions.checkState(
+        summarySize == testTargetsSize,
+        "Unequal sizes: %s vs %s (%s and %s)",
+        summarySize,
+        testTargetsSize,
+        summaries,
+        testTargets);
+
+    notifier.notify(summaries, totalRun);
+
+    if (systemFailure != null) {
+      return systemFailure;
     }
+
+    // skipped targets are not in passCount since they have NO_STATUS
+    Set<ConfiguredTarget> testTargetsSet = new HashSet<>(testTargets);
+    Set<ConfiguredTarget> skippedTargetsSet = new HashSet<>(skippedTargets);
+
+    return passCount == Sets.difference(testTargetsSet, skippedTargetsSet).size()
+        ? DetailedExitCode.success()
+        : TESTS_FAILED_DETAILED_CODE;
   }
 
-  /**
-   * Returns true iff all runs of the target are accounted for.
-   */
-  public boolean targetReported(ConfiguredTarget target) {
-    synchronized (summaryLock) {
-      return summaries.containsKey(asKey(target)) && !remainingRuns.containsKey(asKey(target));
-    }
-  }
-
-  /**
-   * Returns the {@link TestResultAnalyzer} associated with this listener.
-   */
-  public TestResultAnalyzer getAnalyzer() {
-    return analyzer;
-  }
-
-  private LabelAndConfiguration asKey(ConfiguredTarget target) {
-    return new LabelAndConfiguration(target);
+  private static ConfiguredTargetKey asKey(ConfiguredTarget target) {
+    Preconditions.checkArgument(!AliasProvider.isAlias(target));
+    return ConfiguredTargetKey.builder()
+        .setLabel(AliasProvider.getDependencyLabel(target))
+        .setConfigurationKey(target.getConfigurationKey())
+        .build();
   }
 }

@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import java.util.List;
 public interface BatchStat {
 
   /**
-   *
    * @param includeDigest whether to include a file digest in the return values.
    * @param includeLinks whether to include a symlink stat in the return values.
    * @param paths The input paths to stat(), relative to the exec root.

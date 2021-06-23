@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,35 +14,54 @@
 
 package com.google.devtools.build.lib.events;
 
-/**
- * Passes through any events, and keeps a flag if any of them were errors. It is thread-safe as long
- * as the target eventHandler is thread-safe.
- */
-public final class ErrorSensingEventHandler extends DelegatingEventHandler {
+import java.util.concurrent.atomic.AtomicReference;
+import javax.annotation.Nullable;
 
+/**
+ * Passes through any events, and notes if any of them were errors. It is thread-safe as long as the
+ * target eventHandler is thread-safe.
+ *
+ * <p>Optionally retains the first error event property value associated with a specified class.
+ */
+public final class ErrorSensingEventHandler<T> extends DelegatingEventHandler {
+
+  @Nullable private final Class<T> errorPropertyClass;
+  private final AtomicReference<T> errorProperty = new AtomicReference<>(null);
   private volatile boolean hasErrors;
 
-  public ErrorSensingEventHandler(EventHandler eventHandler) {
+  public ErrorSensingEventHandler(
+      ExtendedEventHandler eventHandler, @Nullable Class<T> errorPropertyClass) {
     super(eventHandler);
+    this.errorPropertyClass = errorPropertyClass;
+  }
+
+  public static ErrorSensingEventHandler<Void> withoutPropertyValueTracking(
+      ExtendedEventHandler eventHandler) {
+    return new ErrorSensingEventHandler<>(eventHandler, /*errorPropertyClass=*/ null);
   }
 
   @Override
   public void handle(Event e) {
-    hasErrors |= e.getKind() == EventKind.ERROR;
+    if (e.getKind() == EventKind.ERROR) {
+      hasErrors = true;
+      if (errorPropertyClass != null) {
+        T propertyValue = e.getProperty(errorPropertyClass);
+        if (propertyValue != null) {
+          errorProperty.compareAndSet(/*expect=*/ null, /*update=*/ propertyValue);
+        }
+      }
+    }
     super.handle(e);
   }
 
-  /**
-   * Returns whether any of the events on this objects were errors.
-   */
+  /** Returns whether any of the events on this objects were errors. */
   public boolean hasErrors() {
     return hasErrors;
   }
 
-  /**
-   * Reset the error flag. Don't call this while other threads are accessing the same object.
-   */
-  public void resetErrors() {
-    hasErrors = false;
+  /** Returns the retained error event property value, if any. */
+  @Nullable
+  public T getErrorProperty() {
+    return errorProperty.get();
   }
 }

@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,13 +13,32 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis;
 
+import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.analysis.config.ConfigAwareAspectBuilder;
+import com.google.devtools.build.lib.analysis.config.Fragment;
+import com.google.devtools.build.lib.analysis.config.HostTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
+import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.packages.AdvertisedProviderSet;
 import com.google.devtools.build.lib.packages.AspectDefinition;
-import com.google.devtools.build.lib.packages.Type;
-import com.google.devtools.build.lib.syntax.Label;
-
+import com.google.devtools.build.lib.packages.AspectParameters;
+import com.google.devtools.build.lib.packages.Attribute;
+import com.google.devtools.build.lib.packages.Attribute.LabelLateBoundDefault;
+import com.google.devtools.build.lib.packages.Attribute.LateBoundDefault;
+import com.google.devtools.build.lib.packages.BuildType;
+import com.google.devtools.build.lib.packages.ConfigurationFragmentPolicy.MissingFragmentPolicy;
+import com.google.devtools.build.lib.packages.NativeAspectClass;
+import com.google.devtools.build.lib.packages.StarlarkProvider;
+import com.google.devtools.build.lib.packages.StarlarkProviderIdentifier;
+import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
+import com.google.devtools.build.lib.util.FileTypeSet;
+import net.starlark.java.annot.StarlarkBuiltin;
+import net.starlark.java.eval.StarlarkValue;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -29,51 +48,355 @@ import org.junit.runners.JUnit4;
  */
 @RunWith(JUnit4.class)
 public class AspectDefinitionTest {
+
+  private static final class P1 implements TransitiveInfoProvider {}
+
+  private static final class P2 implements TransitiveInfoProvider {}
+
+  private static final class P3 implements TransitiveInfoProvider {}
+
+  private static final class P4 implements TransitiveInfoProvider {}
+
+  private static final Label FAKE_LABEL = Label.parseAbsoluteUnchecked("//fake/label.bzl");
+
+  private static final StarlarkProviderIdentifier STARLARK_P1 =
+      StarlarkProviderIdentifier.forKey(new StarlarkProvider.Key(FAKE_LABEL, "STARLARK_P1"));
+
+  private static final StarlarkProviderIdentifier STARLARK_P2 =
+      StarlarkProviderIdentifier.forKey(new StarlarkProvider.Key(FAKE_LABEL, "STARLARK_P2"));
+
+  private static final StarlarkProviderIdentifier STARLARK_P3 =
+      StarlarkProviderIdentifier.forKey(new StarlarkProvider.Key(FAKE_LABEL, "STARLARK_P3"));
+
+  private static final StarlarkProviderIdentifier STARLARK_P4 =
+      StarlarkProviderIdentifier.forKey(new StarlarkProvider.Key(FAKE_LABEL, "STARLARK_P4"));
+
   /**
    * A dummy aspect factory. Is there to demonstrate how to define aspects and so that we can test
    * {@code attributeAspect}.
    */
-  public static final class TestAspectFactory implements ConfiguredAspectFactory {
-    private final AspectDefinition definition;
+  public static final class TestAspectClass extends NativeAspectClass
+    implements ConfiguredAspectFactory {
+    private AspectDefinition definition;
 
-    /**
-     * Normal aspects will have an argumentless constructor and their definition will be hard-wired
-     * as a static member. This one is different so that we can create the definition in a test
-     * method.
-     */
-    private TestAspectFactory(AspectDefinition definition) {
+    public void setAspectDefinition(AspectDefinition definition) {
       this.definition = definition;
     }
 
     @Override
-    public Aspect create(ConfiguredTarget base, RuleContext context) {
+    public ConfiguredAspect create(
+        ConfiguredTargetAndData ctadBase,
+        RuleContext context,
+        AspectParameters parameters,
+        String toolsRepository) {
       throw new IllegalStateException();
     }
 
     @Override
-    public AspectDefinition getDefinition() {
+    public AspectDefinition getDefinition(AspectParameters aspectParameters) {
       return definition;
     }
   }
 
+  public static final TestAspectClass TEST_ASPECT_CLASS = new TestAspectClass();
+
   @Test
-  public void testSimpleAspect() throws Exception {
-    new AspectDefinition.Builder("simple")
-        .add(attr("$runtime", Type.LABEL).value(Label.parseAbsoluteUnchecked("//run:time")))
-        .attributeAspect("deps", TestAspectFactory.class)
+  public void testAspectWithImplicitOrLateboundAttribute_addsToAttributeMap() throws Exception {
+    Attribute implicit = attr("$runtime", BuildType.LABEL)
+        .value(Label.parseAbsoluteUnchecked("//run:time"))
         .build();
+    LabelLateBoundDefault<Void> latebound =
+        LateBoundDefault.fromConstantForTesting(Label.parseAbsoluteUnchecked("//run:away"));
+    AspectDefinition simple = new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+        .add(implicit)
+        .add(attr(":latebound", BuildType.LABEL).value(latebound))
+        .build();
+    assertThat(simple.getAttributes()).containsEntry("$runtime", implicit);
+    assertThat(simple.getAttributes()).containsKey(":latebound");
+    assertThat(simple.getAttributes().get(":latebound").getLateBoundDefault())
+        .isEqualTo(latebound);
   }
 
   @Test
-  public void testAspectWithUserVisibleAttribute() throws Exception {
-    try {
-      new AspectDefinition.Builder("user_visible_attribute")
-          .add(attr("invalid", Type.LABEL).value(Label.parseAbsoluteUnchecked("//run:time")))
-          .attributeAspect("deps", TestAspectFactory.class)
-          .build();
-      fail(); // expected IllegalStateException
-    } catch (IllegalStateException e) {
-      // expected
-    }
+  public void testAspectWithDuplicateAttribute_failsToAdd() throws Exception {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+                .add(
+                    attr("$runtime", BuildType.LABEL)
+                        .value(Label.parseAbsoluteUnchecked("//run:time")))
+                .add(
+                    attr("$runtime", BuildType.LABEL)
+                        .value(Label.parseAbsoluteUnchecked("//oops"))));
   }
+
+  @Test
+  public void testAspectWithUserVisibleAttribute_failsToAdd() throws Exception {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+                .add(
+                    attr("invalid", BuildType.LABEL)
+                        .value(Label.parseAbsoluteUnchecked("//run:time"))
+                        .allowedFileTypes(FileTypeSet.NO_FILE))
+                .build());
+  }
+
+  @Test
+  public void testAttributeAspect_wrapsAndAddsToMap() throws Exception {
+    AspectDefinition withAspects = new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+        .propagateAlongAttribute("srcs")
+        .propagateAlongAttribute("deps")
+        .build();
+
+    assertThat(withAspects.propagateAlong("srcs")).isTrue();
+    assertThat(withAspects.propagateAlong("deps")).isTrue();
+  }
+
+  @Test
+  public void testAttributeAspect_allAttributes() throws Exception {
+    AspectDefinition withAspects = new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+        .propagateAlongAllAttributes()
+        .build();
+
+    assertThat(withAspects.propagateAlong("srcs")).isTrue();
+    assertThat(withAspects.propagateAlong("deps")).isTrue();
+  }
+
+  @Test
+  public void testRequireBuiltinProviders_addsToSetOfRequiredProvidersAndNames() throws Exception {
+    AspectDefinition requiresProviders =
+        new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+            .requireProviders(P1.class, P2.class)
+            .build();
+    AdvertisedProviderSet expectedOkSet =
+        AdvertisedProviderSet.builder()
+            .addBuiltin(P1.class)
+            .addBuiltin(P2.class)
+            .addBuiltin(P3.class)
+            .build();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedOkSet))
+        .isTrue();
+
+    AdvertisedProviderSet expectedFailSet =
+        AdvertisedProviderSet.builder().addBuiltin(P1.class).build();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedFailSet))
+        .isFalse();
+
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.ANY))
+        .isTrue();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.EMPTY))
+        .isFalse();
+  }
+
+  @Test
+  public void testRequireBuiltinProviders_addsTwoSetsOfRequiredProvidersAndNames()
+      throws Exception {
+    AspectDefinition requiresProviders =
+        new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+            .requireProviderSets(
+                ImmutableList.of(ImmutableSet.of(P1.class, P2.class), ImmutableSet.of(P3.class)))
+            .build();
+
+    AdvertisedProviderSet expectedOkSet1 =
+        AdvertisedProviderSet.builder().addBuiltin(P1.class).addBuiltin(P2.class).build();
+
+    AdvertisedProviderSet expectedOkSet2 =
+        AdvertisedProviderSet.builder().addBuiltin(P3.class).build();
+
+    AdvertisedProviderSet expectedFailSet =
+        AdvertisedProviderSet.builder().addBuiltin(P4.class).build();
+
+   assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.ANY))
+       .isTrue();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedOkSet1)).isTrue();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedOkSet2)).isTrue();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedFailSet)).isFalse();
+   assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.EMPTY))
+       .isFalse();
+
+ }
+
+  @Test
+  public void testRequireStarlarkProviders_addsFlatSetOfRequiredProviders() throws Exception {
+    AspectDefinition requiresProviders =
+        new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+            .requireStarlarkProviders(STARLARK_P1, STARLARK_P2)
+            .build();
+
+    AdvertisedProviderSet expectedOkSet =
+        AdvertisedProviderSet.builder()
+            .addStarlark(STARLARK_P1)
+            .addStarlark(STARLARK_P2)
+            .addStarlark(STARLARK_P3)
+            .build();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedOkSet)).isTrue();
+
+    AdvertisedProviderSet expectedFailSet =
+        AdvertisedProviderSet.builder().addStarlark(STARLARK_P1).build();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedFailSet)).isFalse();
+
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.ANY))
+        .isTrue();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.EMPTY))
+        .isFalse();
+  }
+
+  @Test
+  public void testRequireStarlarkProviders_addsTwoSetsOfRequiredProviders() throws Exception {
+    AspectDefinition requiresProviders =
+        new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+            .requireStarlarkProviderSets(
+                ImmutableList.of(
+                    ImmutableSet.of(STARLARK_P1, STARLARK_P2), ImmutableSet.of(STARLARK_P3)))
+            .build();
+
+    AdvertisedProviderSet expectedOkSet1 =
+        AdvertisedProviderSet.builder().addStarlark(STARLARK_P1).addStarlark(STARLARK_P2).build();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedOkSet1)).isTrue();
+
+    AdvertisedProviderSet expectedOkSet2 =
+        AdvertisedProviderSet.builder().addStarlark(STARLARK_P3).build();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedOkSet2)).isTrue();
+
+    AdvertisedProviderSet expectedFailSet =
+        AdvertisedProviderSet.builder().addStarlark(STARLARK_P4).build();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(expectedFailSet)).isFalse();
+
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.ANY))
+        .isTrue();
+    assertThat(requiresProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.EMPTY))
+        .isFalse();
+  }
+
+  @Test
+  public void testRequireProviders_defaultAcceptsEverything() {
+    AspectDefinition noRequiredProviders = new AspectDefinition.Builder(TEST_ASPECT_CLASS).build();
+
+    AdvertisedProviderSet expectedOkSet =
+        AdvertisedProviderSet.builder().addBuiltin(P4.class).addStarlark(STARLARK_P4).build();
+    assertThat(noRequiredProviders.getRequiredProviders().isSatisfiedBy(expectedOkSet)).isTrue();
+
+    assertThat(noRequiredProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.ANY))
+        .isTrue();
+    assertThat(
+            noRequiredProviders.getRequiredProviders().isSatisfiedBy(AdvertisedProviderSet.EMPTY))
+        .isTrue();
+  }
+
+  @Test
+  public void testRequireAspectClass_defaultAcceptsNothing() {
+    AspectDefinition noAspects = new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+        .build();
+
+    AdvertisedProviderSet expectedFailSet =
+        AdvertisedProviderSet.builder().addBuiltin(P4.class).build();
+
+    assertThat(noAspects.getRequiredProvidersForAspects().isSatisfiedBy(AdvertisedProviderSet.ANY))
+        .isFalse();
+    assertThat(noAspects.getRequiredProvidersForAspects()
+                        .isSatisfiedBy(AdvertisedProviderSet.EMPTY))
+        .isFalse();
+
+    assertThat(noAspects.getRequiredProvidersForAspects().isSatisfiedBy(expectedFailSet))
+        .isFalse();
+  }
+
+  @Test
+  public void testNoConfigurationFragmentPolicySetup_hasNonNullPolicy() throws Exception {
+    AspectDefinition noPolicy = new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+        .build();
+    assertThat(noPolicy.getConfigurationFragmentPolicy()).isNotNull();
+  }
+
+  @Test
+  public void testRequiresConfigurationFragments_propagatedToConfigurationFragmentPolicy()
+      throws Exception {
+    AspectDefinition requiresFragments = new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+        .requiresConfigurationFragments(Integer.class, String.class)
+        .build();
+    assertThat(requiresFragments.getConfigurationFragmentPolicy()).isNotNull();
+    assertThat(
+        requiresFragments.getConfigurationFragmentPolicy().getRequiredConfigurationFragments())
+            .containsExactly(Integer.class, String.class);
+  }
+
+  private static class FooFragment extends Fragment {}
+
+  private static class BarFragment extends Fragment {}
+
+  @Test
+  public void testMissingFragmentPolicy_propagatedToConfigurationFragmentPolicy() throws Exception {
+    AspectDefinition missingFragments =
+        new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+            .setMissingFragmentPolicy(FooFragment.class, MissingFragmentPolicy.IGNORE)
+            .build();
+    assertThat(missingFragments.getConfigurationFragmentPolicy()).isNotNull();
+    assertThat(
+            missingFragments
+                .getConfigurationFragmentPolicy()
+                .getMissingFragmentPolicy(FooFragment.class))
+        .isEqualTo(MissingFragmentPolicy.IGNORE);
+  }
+
+  @Test
+  public void testRequiresHostConfigurationFragments_propagatedToConfigurationFragmentPolicy()
+      throws Exception {
+    AspectDefinition requiresFragments =
+        ConfigAwareAspectBuilder.of(new AspectDefinition.Builder(TEST_ASPECT_CLASS))
+            .requiresHostConfigurationFragments(FooFragment.class, BarFragment.class)
+            .originalBuilder()
+            .build();
+    assertThat(requiresFragments.getConfigurationFragmentPolicy()).isNotNull();
+    assertThat(
+        requiresFragments.getConfigurationFragmentPolicy().getRequiredConfigurationFragments())
+            .containsExactly(FooFragment.class, BarFragment.class);
+  }
+
+  @Test
+  public void testRequiresConfigurationFragmentNames_propagatedToConfigurationFragmentPolicy()
+      throws Exception {
+    AspectDefinition requiresFragments =
+        new AspectDefinition.Builder(TEST_ASPECT_CLASS)
+            .requiresConfigurationFragmentsByStarlarkBuiltinName(ImmutableList.of("test_fragment"))
+            .build();
+    assertThat(requiresFragments.getConfigurationFragmentPolicy()).isNotNull();
+    assertThat(
+        requiresFragments.getConfigurationFragmentPolicy()
+            .isLegalConfigurationFragment(TestFragment.class, NoTransition.INSTANCE))
+        .isTrue();
+  }
+
+  @Test
+  public void testRequiresHostConfigurationFragmentNames_propagatedToConfigurationFragmentPolicy()
+      throws Exception {
+    AspectDefinition requiresFragments =
+        ConfigAwareAspectBuilder.of(new AspectDefinition.Builder(TEST_ASPECT_CLASS))
+            .requiresHostConfigurationFragmentsByStarlarkBuiltinName(
+                ImmutableList.of("test_fragment"))
+            .originalBuilder()
+            .build();
+    assertThat(requiresFragments.getConfigurationFragmentPolicy()).isNotNull();
+    assertThat(
+        requiresFragments.getConfigurationFragmentPolicy()
+            .isLegalConfigurationFragment(TestFragment.class, HostTransition.INSTANCE))
+        .isTrue();
+  }
+
+  @Test
+  public void testEmptyStarlarkConfigurationFragmentPolicySetup_hasNonNullPolicy()
+      throws Exception {
+    AspectDefinition noPolicy =
+        ConfigAwareAspectBuilder.of(new AspectDefinition.Builder(TEST_ASPECT_CLASS))
+            .requiresHostConfigurationFragmentsByStarlarkBuiltinName(ImmutableList.<String>of())
+            .originalBuilder()
+            .requiresConfigurationFragmentsByStarlarkBuiltinName(ImmutableList.<String>of())
+            .build();
+    assertThat(noPolicy.getConfigurationFragmentPolicy()).isNotNull();
+  }
+
+  @StarlarkBuiltin(name = "test_fragment", doc = "test fragment")
+  private static final class TestFragment implements StarlarkValue {}
 }

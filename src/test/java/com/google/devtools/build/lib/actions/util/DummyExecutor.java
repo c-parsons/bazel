@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,25 +13,43 @@
 // limitations under the License.
 package com.google.devtools.build.lib.actions.util;
 
-import com.google.common.eventbus.EventBus;
+import com.google.devtools.build.lib.actions.ActionContext;
+import com.google.devtools.build.lib.actions.ActionExecutionContext.ShowSubcommands;
 import com.google.devtools.build.lib.actions.Executor;
-import com.google.devtools.build.lib.actions.SpawnActionContext;
-import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.util.Clock;
+import com.google.devtools.build.lib.bugreport.BugReporter;
+import com.google.devtools.build.lib.clock.Clock;
+import com.google.devtools.build.lib.testutil.ManualClock;
+import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.common.options.OptionsClassProvider;
+import com.google.devtools.common.options.OptionsProvider;
+import javax.annotation.Nullable;
 
-/**
- * A dummy implementation of Executor.
- */
-public final class DummyExecutor implements Executor {
+/** A dummy implementation of Executor. */
+public class DummyExecutor implements Executor {
+
+  private final FileSystem fileSystem;
   private final Path inputDir;
+  private final ManualClock clock = new ManualClock();
+  @Nullable private final OptionsProvider optionsProvider;
 
-  /**
-   * @param inputDir
-   */
-  public DummyExecutor(Path inputDir) {
+  public DummyExecutor(
+      FileSystem fileSystem, Path inputDir, @Nullable OptionsProvider optionsProvider) {
+    this.fileSystem = fileSystem;
     this.inputDir = inputDir;
+    this.optionsProvider = optionsProvider;
+  }
+
+  public DummyExecutor(FileSystem fileSystem, Path inputDir) {
+    this(fileSystem, inputDir, null);
+  }
+
+  public DummyExecutor() {
+    this(/*fileSystem=*/ null, /*inputDir=*/ null);
+  }
+
+  @Override
+  public FileSystem getFileSystem() {
+    return fileSystem;
   }
 
   @Override
@@ -41,46 +59,29 @@ public final class DummyExecutor implements Executor {
 
   @Override
   public Clock getClock() {
+    return clock;
+  }
+
+  @Override
+  public BugReporter getBugReporter() {
+    return BugReporter.defaultInstance();
+  }
+
+  @Override
+  public <T extends ActionContext> T getContext(Class<T> type) {
     throw new UnsupportedOperationException();
   }
 
   @Override
-  public EventBus getEventBus() {
+  public OptionsProvider getOptions() {
+    if (optionsProvider != null) {
+      return optionsProvider;
+    }
     throw new UnsupportedOperationException();
   }
 
   @Override
-  public boolean getVerboseFailures() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public EventHandler getEventHandler() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public <T extends ActionContext> T getContext(Class<? extends T> type) {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public SpawnActionContext getSpawnActionContext(String mnemonic) {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public OptionsClassProvider getOptions() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public boolean reportsSubcommands() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public void reportSubcommand(String reason, String message) {
+  public ShowSubcommands reportsSubcommands() {
     throw new UnsupportedOperationException();
   }
 }

@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,12 +13,21 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
+import com.google.common.base.Preconditions;
+import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
+import com.google.devtools.build.lib.actions.FileStateType;
+import com.google.devtools.build.lib.actions.FileStateValue;
+import com.google.devtools.build.lib.actions.FileValue;
+import com.google.devtools.build.lib.io.FileSymlinkCycleException;
+import com.google.devtools.build.lib.io.FileSymlinkCycleUniquenessFunction;
+import com.google.devtools.build.lib.io.FileSymlinkException;
+import com.google.devtools.build.lib.io.FileSymlinkInfiniteExpansionException;
+import com.google.devtools.build.lib.io.FileSymlinkInfiniteExpansionUniquenessFunction;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.util.Pair;
-import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
@@ -26,94 +35,115 @@ import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
 import com.google.devtools.build.skyframe.SkyKey;
-import com.google.devtools.build.skyframe.SkyValue;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicReference;
-
 import javax.annotation.Nullable;
 
 /**
  * A {@link SkyFunction} for {@link FileValue}s.
  *
- * <p>Most of the complexity in the implementation is associated to handling symlinks. Namely,
- * this class makes sure that {@code FileValue}s corresponding to symlinks are correctly invalidated
- * if the destination of the symlink is invalidated. Directory symlinks are also covered.
+ * <p>Most of the complexity in the implementation results from wanting incremental correctness in
+ * the presence of symlinks, esp. ancestor directory symlinks.
  */
 public class FileFunction implements SkyFunction {
   private final AtomicReference<PathPackageLocator> pkgLocator;
-  private final TimestampGranularityMonitor tsgm;
-  private final ExternalFilesHelper externalFilesHelper;
 
-  public FileFunction(AtomicReference<PathPackageLocator> pkgLocator,
-      TimestampGranularityMonitor tsgm,
-      ExternalFilesHelper externalFilesHelper) {
+  public FileFunction(AtomicReference<PathPackageLocator> pkgLocator) {
     this.pkgLocator = pkgLocator;
-    this.tsgm = tsgm;
-    this.externalFilesHelper = externalFilesHelper;
+  }
+
+  private static class SymlinkResolutionState {
+    // Suppose we have a path p. One of the goals of FileFunction is to resolve the "real path", if
+    // any, of p. The basic algorithm is to use the fully resolved path of p's parent directory to
+    // determine the fully resolved path of p. This is complicated when symlinks are involved, and
+    // is especially complicated when ancestor directory symlinks are involved.
+    //
+    // Since FileStateValues are the roots of invalidation, care has to be taken to ensuring we
+    // declare the proper FileStateValue deps. As a concrete example, let p = a/b and imagine (i) a
+    // is a direct symlink to c and also (ii) c/b is an existing file. Among other direct deps, we
+    // want to have a direct dep on FileStateValue(c/b), since that's the node that will be changed
+    // if the actual contents of a/b (aka c/b) changes. To rephrase: a dep on FileStateValue(a/b)
+    // won't do anything productive since that path will never be in the Skyframe diff.
+    //
+    // In the course of resolving the real path of p, there will be a logical chain of paths we
+    // consider. Going with the example from above, the full chain of paths we consider is
+    // [a/b, c/b].
+    ArrayList<RootedPath> logicalChain = new ArrayList<>();
+    // Same contents as 'logicalChain', except stored as an sorted TreeSet for efficiency reasons.
+    // See the usage in checkPathSeenDuringPartialResolutionInternal.
+    TreeSet<Path> sortedLogicalChain = Sets.newTreeSet();
+
+    ImmutableList<RootedPath> pathToUnboundedAncestorSymlinkExpansionChain = null;
+    ImmutableList<RootedPath> unboundedAncestorSymlinkExpansionChain = null;
+
+    private SymlinkResolutionState() {}
   }
 
   @Override
-  public SkyValue compute(SkyKey skyKey, Environment env) throws FileFunctionException {
+  public FileValue compute(SkyKey skyKey, Environment env)
+      throws FileFunctionException, InterruptedException {
     RootedPath rootedPath = (RootedPath) skyKey.argument();
-    RootedPath realRootedPath = rootedPath;
-    FileStateValue realFileStateValue = null;
-    PathFragment relativePath = rootedPath.getRelativePath();
+    SymlinkResolutionState symlinkResolutionState = new SymlinkResolutionState();
 
-    // Resolve ancestor symlinks, but only if the current file is not the filesystem root (has no
-    // parent) or a package path root (treated opaquely and handled by skyframe's DiffAwareness
-    // interface). Note that this is the first thing we do - if an ancestor is part of a
-    // symlink cycle, we want to detect that quickly as it gives a more informative error message
-    // than we'd get doing bogus filesystem operations.
-    if (!relativePath.equals(PathFragment.EMPTY_FRAGMENT)) {
-      Pair<RootedPath, FileStateValue> resolvedState =
-          resolveFromAncestors(rootedPath, env);
-      if (resolvedState == null) {
-        return null;
-      }
-      realRootedPath = resolvedState.getFirst();
-      realFileStateValue = resolvedState.getSecond();
-    }
-
-    FileStateValue fileStateValue = (FileStateValue) env.getValue(FileStateValue.key(rootedPath));
-    if (fileStateValue == null) {
+    // Fully resolve the path of the parent directory, but only if the current file is not the
+    // filesystem root (has no parent) or a package path root (treated opaquely and handled by
+    // skyframe's DiffAwareness interface).
+    //
+    // This entails resolving ancestor symlinks fully. Note that this is the first thing we do - if
+    // an ancestor is part of a symlink cycle, we want to detect that quickly as it gives a more
+    // informative error message than we'd get doing bogus filesystem operations.
+    PartialResolutionResult resolveFromAncestorsResult =
+        resolveFromAncestors(rootedPath, symlinkResolutionState, env);
+    if (resolveFromAncestorsResult == null) {
       return null;
     }
-    if (realFileStateValue == null) {
-      realFileStateValue = fileStateValue;
+    RootedPath rootedPathFromAncestors = resolveFromAncestorsResult.rootedPath;
+    FileStateValue fileStateValueFromAncestors = resolveFromAncestorsResult.fileStateValue;
+    if (fileStateValueFromAncestors.getType() == FileStateType.NONEXISTENT) {
+      return FileValue.value(
+          ImmutableList.copyOf(symlinkResolutionState.logicalChain),
+          symlinkResolutionState.pathToUnboundedAncestorSymlinkExpansionChain,
+          symlinkResolutionState.unboundedAncestorSymlinkExpansionChain,
+          rootedPath,
+          FileStateValue.NONEXISTENT_FILE_STATE_NODE,
+          rootedPathFromAncestors,
+          fileStateValueFromAncestors);
     }
 
-    ArrayList<RootedPath> symlinkChain = new ArrayList<>();
-    TreeSet<Path> orderedSeenPaths = Sets.newTreeSet();
-    while (realFileStateValue.getType().equals(FileStateValue.Type.SYMLINK)) {
-      symlinkChain.add(realRootedPath);
-      orderedSeenPaths.add(realRootedPath.asPath());
-      if (externalFilesHelper.shouldAssumeImmutable(realRootedPath)) {
-        // If the file is assumed to be immutable, we want to resolve the symlink chain without
-        // adding dependencies since we don't care about incremental correctness.
-        try {
-          Path realPath = rootedPath.asPath().resolveSymbolicLinks();
-          realRootedPath = RootedPath.toRootedPathMaybeUnderRoot(realPath,
-              pkgLocator.get().getPathEntries());
-          realFileStateValue = FileStateValue.create(realRootedPath, tsgm);
-        } catch (IOException e) {
-          throw new FileFunctionException(e, Transience.TRANSIENT);
-        } catch (InconsistentFilesystemException e) {
-          throw new FileFunctionException(e, Transience.TRANSIENT);
-        }
-      } else {
-        Pair<RootedPath, FileStateValue> resolvedState = getSymlinkTargetRootedPath(realRootedPath,
-            realFileStateValue.getSymlinkTarget(), orderedSeenPaths, symlinkChain, env);
-        if (resolvedState == null) {
-          return null;
-        }
-        realRootedPath = resolvedState.getFirst();
-        realFileStateValue = resolvedState.getSecond();
+    RootedPath realRootedPath = rootedPathFromAncestors;
+    FileStateValue realFileStateValue = fileStateValueFromAncestors;
+
+    while (realFileStateValue.getType().isSymlink()) {
+      PartialResolutionResult getSymlinkTargetRootedPathResult =
+          getSymlinkTargetRootedPath(
+              realRootedPath, realFileStateValue.getSymlinkTarget(), symlinkResolutionState, env);
+      if (getSymlinkTargetRootedPathResult == null) {
+        return null;
       }
+      realRootedPath = getSymlinkTargetRootedPathResult.rootedPath;
+      realFileStateValue = getSymlinkTargetRootedPathResult.fileStateValue;
     }
-    return FileValue.value(rootedPath, fileStateValue, realRootedPath, realFileStateValue);
+
+    return FileValue.value(
+        ImmutableList.copyOf(symlinkResolutionState.logicalChain),
+        symlinkResolutionState.pathToUnboundedAncestorSymlinkExpansionChain,
+        symlinkResolutionState.unboundedAncestorSymlinkExpansionChain,
+        rootedPath,
+        // TODO(b/123922036): This is a bug. Should be 'fileStateValueFromAncestors'.
+        fileStateValueFromAncestors,
+        realRootedPath,
+        realFileStateValue);
+  }
+
+  private static RootedPath getChild(RootedPath parentRootedPath, String baseName) {
+    return RootedPath.toRootedPath(
+        parentRootedPath.getRoot(), parentRootedPath.getRootRelativePath().getChild(baseName));
+  }
+
+  private RootedPath toRootedPath(Path path) {
+    return RootedPath.toRootedPathMaybeUnderRoot(path, pkgLocator.get().getPathEntries());
   }
 
   /**
@@ -121,137 +151,211 @@ public class FileFunction implements SkyFunction {
    * {@code null} if there was a missing dep.
    */
   @Nullable
-  private Pair<RootedPath, FileStateValue> resolveFromAncestors(RootedPath rootedPath,
-      Environment env) throws FileFunctionException {
-    PathFragment relativePath = rootedPath.getRelativePath();
-    RootedPath realRootedPath = rootedPath;
-    FileValue parentFileValue = null;
-    // We only resolve ancestors if the file is not assumed to be immutable (handling ancestors
-    // would be too aggressive).
-    if (!externalFilesHelper.shouldAssumeImmutable(rootedPath)
-        && !relativePath.equals(PathFragment.EMPTY_FRAGMENT)) {
-      RootedPath parentRootedPath = RootedPath.toRootedPath(rootedPath.getRoot(),
-          relativePath.getParentDirectory());
-      parentFileValue = (FileValue) env.getValue(FileValue.key(parentRootedPath));
-      if (parentFileValue == null) {
+  private static PartialResolutionResult resolveFromAncestors(
+      RootedPath rootedPath, SymlinkResolutionState symlinkResolutionState, Environment env)
+      throws InterruptedException, FileFunctionException {
+    RootedPath parentRootedPath = rootedPath.getParentDirectory();
+    return parentRootedPath != null
+        ? resolveFromAncestorsWithParent(rootedPath, parentRootedPath, symlinkResolutionState, env)
+        : resolveFromAncestorsNoParent(rootedPath, symlinkResolutionState, env);
+  }
+
+  @Nullable
+  private static PartialResolutionResult resolveFromAncestorsWithParent(
+      RootedPath rootedPath,
+      RootedPath parentRootedPath,
+      SymlinkResolutionState symlinkResolutionState,
+      Environment env)
+      throws InterruptedException, FileFunctionException {
+    PathFragment relativePath = rootedPath.getRootRelativePath();
+    RootedPath rootedPathFromAncestors;
+    String baseName = relativePath.getBaseName();
+
+    FileValue parentFileValue = (FileValue) env.getValue(FileValue.key(parentRootedPath));
+    if (parentFileValue == null) {
+      return null;
+    }
+    rootedPathFromAncestors = getChild(parentFileValue.realRootedPath(), baseName);
+
+    if (!parentFileValue.exists() || !parentFileValue.isDirectory()) {
+      return new PartialResolutionResult(
+          rootedPathFromAncestors, FileStateValue.NONEXISTENT_FILE_STATE_NODE);
+    }
+
+    for (RootedPath parentPartialRootedPath : parentFileValue.logicalChainDuringResolution()) {
+      checkAndNotePathSeenDuringPartialResolution(
+          getChild(parentPartialRootedPath, baseName), symlinkResolutionState, env);
+      if (env.valuesMissing()) {
         return null;
       }
-      PathFragment baseName = new PathFragment(relativePath.getBaseName());
-      RootedPath parentRealRootedPath = parentFileValue.realRootedPath();
-      realRootedPath = RootedPath.toRootedPath(parentRealRootedPath.getRoot(),
-          parentRealRootedPath.getRelativePath().getRelative(baseName));
+    }
+
+    FileStateValue fileStateValueFromAncestors =
+        (FileStateValue) env.getValue(FileStateValue.key(rootedPathFromAncestors));
+    if (fileStateValueFromAncestors == null) {
+      return null;
+    }
+
+    return new PartialResolutionResult(rootedPathFromAncestors, fileStateValueFromAncestors);
+  }
+
+  @Nullable
+  private static PartialResolutionResult resolveFromAncestorsNoParent(
+      RootedPath rootedPath, SymlinkResolutionState symlinkResolutionState, Environment env)
+      throws InterruptedException, FileFunctionException {
+    checkAndNotePathSeenDuringPartialResolution(rootedPath, symlinkResolutionState, env);
+    if (env.valuesMissing()) {
+      return null;
     }
     FileStateValue realFileStateValue =
-        (FileStateValue) env.getValue(FileStateValue.key(realRootedPath));
+        (FileStateValue) env.getValue(FileStateValue.key(rootedPath));
     if (realFileStateValue == null) {
       return null;
     }
-    if (realFileStateValue.getType() != FileStateValue.Type.NONEXISTENT
-        && parentFileValue != null && !parentFileValue.isDirectory()) {
-      String type = realFileStateValue.getType().toString().toLowerCase();
-      String message = type + " " + rootedPath.asPath() + " exists but its parent "
-          + "directory " + parentFileValue.realRootedPath().asPath() + " doesn't exist.";
-      throw new FileFunctionException(new InconsistentFilesystemException(message),
-          Transience.TRANSIENT);
+    return new PartialResolutionResult(rootedPath, realFileStateValue);
+  }
+
+  private static final class PartialResolutionResult {
+    private final RootedPath rootedPath;
+    private final FileStateValue fileStateValue;
+
+    private PartialResolutionResult(RootedPath rootedPath, FileStateValue fileStateValue) {
+      this.rootedPath = rootedPath;
+      this.fileStateValue = fileStateValue;
     }
-    return Pair.of(realRootedPath, realFileStateValue);
   }
 
   /**
-   * Returns the symlink target and file state of {@code rootedPath}'s symlink to
-   * {@code symlinkTarget}, accounting for ancestor symlinks, or {@code null} if there was a
-   * missing dep.
+   * Returns the symlink target and file state of {@code rootedPath}'s symlink to {@code
+   * symlinkTarget}, accounting for ancestor symlinks, or {@code null} if there was a missing dep.
    */
   @Nullable
-  private Pair<RootedPath, FileStateValue> getSymlinkTargetRootedPath(RootedPath rootedPath,
-      PathFragment symlinkTarget, TreeSet<Path> orderedSeenPaths,
-      Iterable<RootedPath> symlinkChain, Environment env) throws FileFunctionException {
-    RootedPath symlinkTargetRootedPath;
+  private PartialResolutionResult getSymlinkTargetRootedPath(
+      RootedPath rootedPath,
+      PathFragment symlinkTarget,
+      SymlinkResolutionState symlinkResolutionState,
+      Environment env)
+      throws FileFunctionException, InterruptedException {
+    Path path = rootedPath.asPath();
+    Path symlinkTargetPath;
     if (symlinkTarget.isAbsolute()) {
-      Path path = rootedPath.asPath().getFileSystem().getRootDirectory().getRelative(
-          symlinkTarget);
-      symlinkTargetRootedPath =
-          RootedPath.toRootedPathMaybeUnderRoot(path, pkgLocator.get().getPathEntries());
+      symlinkTargetPath = path.getRelative(symlinkTarget);
     } else {
-      Path path = rootedPath.asPath();
-      Path symlinkTargetPath;
-      if (path.getParentDirectory() != null) {
-        RootedPath parentRootedPath = RootedPath.toRootedPathMaybeUnderRoot(
-            path.getParentDirectory(), pkgLocator.get().getPathEntries());
-        FileValue parentFileValue = (FileValue) env.getValue(FileValue.key(parentRootedPath));
-        if (parentFileValue == null) {
-          return null;
-        }
-        symlinkTargetPath = parentFileValue.realRootedPath().asPath().getRelative(symlinkTarget);
-      } else {
-        // This means '/' is a symlink to 'symlinkTarget'.
-        symlinkTargetPath = path.getRelative(symlinkTarget);
-      }
-      symlinkTargetRootedPath = RootedPath.toRootedPathMaybeUnderRoot(symlinkTargetPath,
-          pkgLocator.get().getPathEntries());
+      Path parentPath = path.getParentDirectory();
+      symlinkTargetPath =
+          parentPath != null
+              ? parentPath.getRelative(symlinkTarget)
+              : path.getRelative(symlinkTarget);
     }
-    Path symlinkTargetPath = symlinkTargetRootedPath.asPath();
-    Path existingFloorPath = orderedSeenPaths.floor(symlinkTargetPath);
-    // Here is a brief argument that the following logic is correct.
-    //
-    // Any path 'p' in the symlink chain that is no larger than 'symlinkTargetPath' is one of:
-    //   (i)   'symlinkTargetPath'
-    //   (ii)   a smaller sibling 's' of 'symlinkTargetPath' or a sibling of an ancestor of
-    //         'symlinkTargetPath'
-    //   (iii)  an ancestor 'a' of 'symlinkTargetPath'
-    //   (iv) something else (e.g. a smaller sibling of an ancestor of 'symlinkTargetPath')
-    // If the largest 'p' is 'symlinkTarget' itself then 'existingFloorPath' will be that and we
-    // have found cycle. Otherwise, if there is such a 's' then 'existingFloorPath' will be the
-    // largest one. But the presence of any such 's' in the symlink chain implies an infinite
-    // expansion, which we would have already noticed. On the other hand, if there is such an 'a'
-    // then 'existingFloorPath' will be the largest one that and we definitely have found an
-    // infinite symlink expansion. Otherwise, if there is no such 'a', then the presence of
-    // 'symlinkTargetPath' doesn't create an infinite symlink expansion.
-    if (existingFloorPath != null && symlinkTargetPath.startsWith(existingFloorPath)) {
-      SkyKey uniquenessKey;
-      FileSymlinkException fse;
-      if (symlinkTargetPath.equals(existingFloorPath)) {
-        Pair<ImmutableList<RootedPath>, ImmutableList<RootedPath>> pathAndChain =
-            splitIntoPathAndChain(symlinkTargetRootedPath.asPath(), symlinkChain);
-        FileSymlinkCycleException fsce =
-            new FileSymlinkCycleException(pathAndChain.getFirst(), pathAndChain.getSecond());
-        uniquenessKey = FileSymlinkCycleUniquenessValue.key(fsce.getCycle());
-        fse = fsce;
-      } else {
-        Pair<ImmutableList<RootedPath>, ImmutableList<RootedPath>> pathAndChain =
-            splitIntoPathAndChain(existingFloorPath,
-                ImmutableList.copyOf(Iterables.concat(symlinkChain,
-                    ImmutableList.of(symlinkTargetRootedPath))));
-        uniquenessKey = FileSymlinkInfiniteExpansionUniquenessValue.key(pathAndChain.getSecond());
-        fse = new FileSymlinkInfiniteExpansionException(
-            pathAndChain.getFirst(), pathAndChain.getSecond());
-      }
-      if (env.getValue(uniquenessKey) == null) {
-        // Note that this dependency is merely to ensure that each unique symlink error gets
-        // reported exactly once.
-        return null;
-      }
-      throw new FileFunctionException(fse);
+    RootedPath symlinkTargetRootedPath = toRootedPath(symlinkTargetPath);
+    checkPathSeenDuringPartialResolution(symlinkTargetRootedPath, symlinkResolutionState, env);
+    if (env.valuesMissing()) {
+      return null;
     }
-    return resolveFromAncestors(symlinkTargetRootedPath, env);
+    // The symlink target could have a different parent directory, which itself could be a directory
+    // symlink (or have an ancestor directory symlink)!
+    return resolveFromAncestors(symlinkTargetRootedPath, symlinkResolutionState, env);
   }
 
-  private Pair<ImmutableList<RootedPath>, ImmutableList<RootedPath>> splitIntoPathAndChain(
-      Path startOfCycle, Iterable<RootedPath> symlinkRootedPaths) {
-    boolean inPathToCycle = true;
-    ImmutableList.Builder<RootedPath> pathToCycleBuilder = ImmutableList.builder();
-    ImmutableList.Builder<RootedPath> cycleBuilder = ImmutableList.builder();
-    for (RootedPath rootedPath : symlinkRootedPaths) {
-      if (rootedPath.asPath().equals(startOfCycle)) {
-        inPathToCycle = false;
-      }
-      if (inPathToCycle) {
-        pathToCycleBuilder.add(rootedPath);
-      } else {
-        cycleBuilder.add(rootedPath);
+  private static void checkAndNotePathSeenDuringPartialResolution(
+      RootedPath rootedPath, SymlinkResolutionState symlinkResolutionState, Environment env)
+      throws FileFunctionException, InterruptedException {
+    Path path = rootedPath.asPath();
+    checkPathSeenDuringPartialResolutionInternal(rootedPath, path, symlinkResolutionState, env);
+    symlinkResolutionState.sortedLogicalChain.add(path);
+    symlinkResolutionState.logicalChain.add(rootedPath);
+  }
+
+  private static void checkPathSeenDuringPartialResolution(
+      RootedPath rootedPath, SymlinkResolutionState symlinkResolutionState, Environment env)
+      throws FileFunctionException, InterruptedException {
+    checkPathSeenDuringPartialResolutionInternal(
+        rootedPath, rootedPath.asPath(), symlinkResolutionState, env);
+  }
+
+  private static void checkPathSeenDuringPartialResolutionInternal(
+      RootedPath rootedPath,
+      Path path,
+      SymlinkResolutionState symlinkResolutionState,
+      Environment env)
+      throws FileFunctionException, InterruptedException {
+    // We are about to perform another step of partial real path resolution. 'logicalChain' is the
+    // chain of paths we've considered so far, and 'rootedPath' / 'path' is the proposed next path
+    // we consider.
+    //
+    // Before we proceed with 'rootedPath', we need to ensure there won't be a problem. There are
+    // three sorts of issues, all stemming from symlinks:
+    //   (i) Symlink cycle:
+    //     p -> p1 -> p2 -> p1
+    //   (ii) Unbounded expansion caused by a symlink to a descendant of a member of the chain:
+    //     p -> a/b -> c/d -> a/b/e
+    //   (iii) Unbounded expansion caused by a symlink to an ancestor of a member of the chain:
+    //     p -> a/b -> c/d -> a
+    //
+    // We can detect all three of these symlink issues via inspection of the proposed new element.
+    // Here is our incremental algorithm:
+    //   If 'path' is in 'sortedLogicalChain' then we have a found a cycle (i).
+    //   If 'path' is a descendant of any path p in 'sortedLogicalChain' then we have unbounded
+    //   expansion (ii).
+    //   If 'path' is an ancestor of any path p in 'sortedLogicalChain' then we have unbounded
+    //   expansion (iii).
+    // We can check for these cases efficiently (read: sublinear time) by finding the extremal
+    // candidate p for (ii) and (iii).
+    SkyKey uniquenessKey = null;
+    FileSymlinkException fse = null;
+    Path seenFloorPath = symlinkResolutionState.sortedLogicalChain.floor(path);
+    Path seenCeilingPath = symlinkResolutionState.sortedLogicalChain.ceiling(path);
+    if (symlinkResolutionState.sortedLogicalChain.contains(path)) {
+      // 'rootedPath' is [transitively] a symlink to a previous element in the symlink chain (i).
+      Pair<ImmutableList<RootedPath>, ImmutableList<RootedPath>> pathAndChain =
+          CycleUtils.splitIntoPathAndChain(
+              isPathPredicate(path), symlinkResolutionState.logicalChain);
+      FileSymlinkCycleException fsce =
+          new FileSymlinkCycleException(pathAndChain.getFirst(), pathAndChain.getSecond());
+      uniquenessKey = FileSymlinkCycleUniquenessFunction.key(fsce.getCycle());
+      fse = fsce;
+    } else if (seenFloorPath != null && path.startsWith(seenFloorPath)) {
+      // 'rootedPath' is [transitively] a symlink to a descendant of a previous element in the
+      // symlink chain (ii).
+      Pair<ImmutableList<RootedPath>, ImmutableList<RootedPath>> pathAndChain =
+          CycleUtils.splitIntoPathAndChain(
+              isPathPredicate(seenFloorPath),
+              ImmutableList.copyOf(
+                  Iterables.concat(
+                      symlinkResolutionState.logicalChain, ImmutableList.of(rootedPath))));
+      uniquenessKey = FileSymlinkInfiniteExpansionUniquenessFunction.key(pathAndChain.getSecond());
+      fse =
+          new FileSymlinkInfiniteExpansionException(
+              pathAndChain.getFirst(), pathAndChain.getSecond());
+    } else if (seenCeilingPath != null && seenCeilingPath.startsWith(path)) {
+      // 'rootedPath' is [transitively] a symlink to an ancestor of a previous element in the
+      // symlink chain (iii).
+      if (symlinkResolutionState.unboundedAncestorSymlinkExpansionChain == null) {
+        Pair<ImmutableList<RootedPath>, ImmutableList<RootedPath>> pathAndChain =
+            CycleUtils.splitIntoPathAndChain(
+                isPathPredicate(seenCeilingPath),
+                ImmutableList.copyOf(
+                    Iterables.concat(
+                        symlinkResolutionState.logicalChain, ImmutableList.of(rootedPath))));
+        symlinkResolutionState.pathToUnboundedAncestorSymlinkExpansionChain =
+            pathAndChain.getFirst();
+        symlinkResolutionState.unboundedAncestorSymlinkExpansionChain = pathAndChain.getSecond();
       }
     }
-    return Pair.of(pathToCycleBuilder.build(), cycleBuilder.build());
+    if (uniquenessKey != null) {
+      // Note that this dependency is merely to ensure that each unique symlink error gets
+      // reported exactly once.
+      env.getValue(uniquenessKey);
+      if (env.valuesMissing()) {
+        return;
+      }
+      throw new FileFunctionException(
+          Preconditions.checkNotNull(fse, rootedPath), Transience.PERSISTENT);
+    }
+  }
+
+  private static Predicate<RootedPath> isPathPredicate(Path path) {
+    return rootedPath -> rootedPath.asPath().equals(path);
   }
 
   @Nullable
@@ -261,20 +365,11 @@ public class FileFunction implements SkyFunction {
   }
 
   /**
-   * Used to declare all the exception types that can be wrapped in the exception thrown by
-   * {@link FileFunction#compute}.
+   * Used to declare all the exception types that can be wrapped in the exception thrown by {@link
+   * FileFunction#compute}.
    */
   private static final class FileFunctionException extends SkyFunctionException {
-
-    public FileFunctionException(InconsistentFilesystemException e, Transience transience) {
-      super(e, transience);
-    }
-
-    public FileFunctionException(FileSymlinkException e) {
-      super(e, Transience.PERSISTENT);
-    }
-
-    public FileFunctionException(IOException e, Transience transience) {
+    FileFunctionException(IOException e, Transience transience) {
       super(e, transience);
     }
   }

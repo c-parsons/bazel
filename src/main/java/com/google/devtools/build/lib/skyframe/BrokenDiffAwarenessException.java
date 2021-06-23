@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * Thrown on {@link DiffAwareness#getDiff} to indicate that something is wrong with the
@@ -22,6 +22,10 @@ import com.google.common.base.Preconditions;
 public class BrokenDiffAwarenessException extends Exception {
 
   public BrokenDiffAwarenessException(String msg) {
-    super(Preconditions.checkNotNull(msg));
+    super(checkNotNull(msg));
+  }
+
+  public BrokenDiffAwarenessException(String msg, Throwable cause) {
+    super(checkNotNull(msg), cause);
   }
 }

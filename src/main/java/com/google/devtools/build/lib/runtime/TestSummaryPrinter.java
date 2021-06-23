@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@ package com.google.devtools.build.lib.runtime;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Strings;
-import com.google.devtools.build.lib.rules.test.TestLogHelper;
-import com.google.devtools.build.lib.rules.test.TestStrategy.TestOutputFormat;
+import com.google.devtools.build.lib.exec.ExecutionOptions.TestOutputFormat;
+import com.google.devtools.build.lib.exec.TestLogHelper;
 import com.google.devtools.build.lib.util.LoggingUtil;
 import com.google.devtools.build.lib.util.io.AnsiTerminalPrinter;
 import com.google.devtools.build.lib.util.io.AnsiTerminalPrinter.Mode;
@@ -24,10 +24,10 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.view.test.TestStatus.BlazeTestStatus;
 import com.google.devtools.build.lib.view.test.TestStatus.FailedTestCasesStatus;
 import com.google.devtools.build.lib.view.test.TestStatus.TestCase;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 
@@ -37,22 +37,39 @@ import java.util.logging.Level;
 public class TestSummaryPrinter {
 
   /**
-   * Print the cached test log to the given printer.
+   * Interface for getting the {@link String} to display to the user for a {@link Path}
+   * corresponding to a test output (e.g. test log).
    */
-  public static void printCachedOutput(TestSummary summary,
-      TestOutputFormat testOutput,
-      AnsiTerminalPrinter printer) {
+  public interface TestLogPathFormatter {
+    String getPathStringToPrint(Path path);
+  }
 
-    String testName = summary.getTarget().getLabel().toString();
+  /** Print the cached test log to the given printer. */
+  public static void printCachedOutput(
+      TestSummary summary,
+      TestOutputFormat testOutput,
+      AnsiTerminalPrinter printer,
+      TestLogPathFormatter testLogPathFormatter,
+      int maxTestOutputBytes) {
+
+    String testName = summary.getLabel().toString();
     List<String> allLogs = new ArrayList<>();
     for (Path path : summary.getFailedLogs()) {
-      allLogs.add(path.getPathString());
+      allLogs.add(testLogPathFormatter.getPathStringToPrint(path));
     }
     for (Path path : summary.getPassedLogs()) {
-      allLogs.add(path.getPathString());
+      allLogs.add(testLogPathFormatter.getPathStringToPrint(path));
     }
-    printer.printLn("" + TestSummary.getStatusMode(summary.getStatus()) + summary.getStatus() + ": "
-        + Mode.DEFAULT + testName + " (see " + Joiner.on(' ').join(allLogs) + ")");
+    printer.printLn(
+        ""
+            + summary.getStatusMode()
+            + summary.getStatus()
+            + ": "
+            + Mode.DEFAULT
+            + testName
+            + " (see "
+            + Joiner.on(' ').join(allLogs)
+            + ")");
     printer.printLn(Mode.INFO + "INFO: " + Mode.DEFAULT + "From Testing " + testName);
 
     // Whether to output the target at all was checked by the caller.
@@ -60,7 +77,7 @@ public class TestSummaryPrinter {
     if (TestLogHelper.shouldOutputTestLog(testOutput, false)) {
       for (Path path : summary.getFailedLogs()) {
         try {
-          TestLogHelper.writeTestLog(path, testName, printer.getOutputStream());
+          TestLogHelper.writeTestLog(path, testName, printer.getOutputStream(), maxTestOutputBytes);
         } catch (IOException e) {
           printer.printLn("==================== Could not read test output for " + testName);
           LoggingUtil.logToRemote(Level.WARNING, "Error while reading test log", e);
@@ -72,7 +89,7 @@ public class TestSummaryPrinter {
     if (TestLogHelper.shouldOutputTestLog(testOutput, true)) {
       for (Path path : summary.getPassedLogs()) {
         try {
-          TestLogHelper.writeTestLog(path, testName, printer.getOutputStream());
+          TestLogHelper.writeTestLog(path, testName, printer.getOutputStream(), maxTestOutputBytes);
         } catch (Exception e) {
           printer.printLn("==================== Could not read test output for " + testName);
           LoggingUtil.logToRemote(Level.WARNING, "Error while reading test log", e);
@@ -81,8 +98,33 @@ public class TestSummaryPrinter {
     }
   }
 
-  private static String statusString(BlazeTestStatus status) {
-    return status.toString().replace('_', ' ');
+  private static String statusString(TestSummary summary) {
+    if (summary.isSkipped()) {
+      // If the test was skipped then its status will be something like NO_STATUS. That's not
+      // informative enough to a user. Instead, return "SKIPPED" for skipped tests.
+      return "SKIPPED";
+    }
+    return summary.getStatus().toString().replace('_', ' ');
+  }
+
+  /**
+   * Prints summary status for a single test.
+   *
+   * @param terminalPrinter The printer to print to
+   */
+  public static void print(
+      TestSummary summary,
+      AnsiTerminalPrinter terminalPrinter,
+      TestLogPathFormatter testLogPathFormatter,
+      boolean verboseSummary,
+      boolean printFailedTestCases) {
+    print(
+        summary,
+        terminalPrinter,
+        testLogPathFormatter,
+        verboseSummary,
+        printFailedTestCases,
+        false);
   }
 
   /**
@@ -92,16 +134,29 @@ public class TestSummaryPrinter {
   public static void print(
       TestSummary summary,
       AnsiTerminalPrinter terminalPrinter,
-      boolean verboseSummary, boolean printFailedTestCases) {
+      TestLogPathFormatter testLogPathFormatter,
+      boolean verboseSummary,
+      boolean printFailedTestCases,
+      boolean withConfigurationName) {
+    BlazeTestStatus status = summary.getStatus();
     // Skip output for tests that failed to build.
-    if (summary.getStatus() == BlazeTestStatus.FAILED_TO_BUILD) {
+    if ((!verboseSummary && status == BlazeTestStatus.FAILED_TO_BUILD)
+        || status == BlazeTestStatus.BLAZE_HALTED_BEFORE_TESTING) {
       return;
     }
-    String message = getCacheMessage(summary) + statusString(summary.getStatus());
+    String message = getCacheMessage(summary) + statusString(summary);
+    String targetName = summary.getLabel().toString();
+    if (withConfigurationName) {
+      targetName += " (" + summary.getConfiguration().getMnemonic() + ")";
+    }
     terminalPrinter.print(
-        Strings.padEnd(summary.getTarget().getLabel().toString(), 78 - message.length(), ' ')
-        + " " + TestSummary.getStatusMode(summary.getStatus()) + message + Mode.DEFAULT
-        + (verboseSummary ? getAttemptSummary(summary) + getTimeSummary(summary) : "") + "\n");
+        Strings.padEnd(targetName, 78 - message.length(), ' ')
+            + " "
+            + summary.getStatusMode()
+            + message
+            + Mode.DEFAULT
+            + (verboseSummary ? getAttemptSummary(summary) + getTimeSummary(summary) : "")
+            + "\n");
 
     if (printFailedTestCases && summary.getStatus() == BlazeTestStatus.FAILED) {
       if (summary.getFailedTestCasesStatus() == FailedTestCasesStatus.NOT_AVAILABLE) {
@@ -125,31 +180,23 @@ public class TestSummaryPrinter {
       }
     }
 
-    if (printFailedTestCases) {
-      // In this mode, test output and coverage files would just clutter up
-      // the output.
-      return;
-    }
+    if (!printFailedTestCases) {
+      for (String warning : summary.getWarnings()) {
+        terminalPrinter.print("  " + AnsiTerminalPrinter.Mode.WARNING + "WARNING: "
+            + AnsiTerminalPrinter.Mode.DEFAULT + warning + "\n");
+      }
 
-    for (String warning : summary.getWarnings()) {
-      terminalPrinter.print("  " + AnsiTerminalPrinter.Mode.WARNING + "WARNING: "
-          + AnsiTerminalPrinter.Mode.DEFAULT + warning + "\n");
-    }
-
-    for (Path path : summary.getFailedLogs()) {
-      if (path.exists()) {
-        // Don't use getPrettyPath() here - we want to print the absolute path,
-        // so that it cut and paste into a different terminal, and we don't
-        // want to use the blaze-bin etc. symbolic links because they could be changed
-        // by a subsequent build with different options.
-        terminalPrinter.print("  " + path.getPathString() + "\n");
+      for (Path path : summary.getFailedLogs()) {
+        if (path.exists()) {
+          terminalPrinter.print("  " + testLogPathFormatter.getPathStringToPrint(path) + "\n");
+        }
       }
     }
     for (Path path : summary.getCoverageFiles()) {
       // Print only non-trivial coverage files.
       try {
         if (path.exists() && path.getFileSize() > 0) {
-          terminalPrinter.print("  " + path.getPathString() + "\n");
+          terminalPrinter.print("  " + testLogPathFormatter.getPathStringToPrint(path) + "\n");
         }
       } catch (IOException e) {
         LoggingUtil.logToRemote(Level.WARNING, "Error while reading coverage data file size",
@@ -191,7 +238,7 @@ public class TestSummaryPrinter {
    */
   static String timeInSec(long time, TimeUnit unit) {
     double ms = TimeUnit.MILLISECONDS.convert(time, unit);
-    return String.format("%.1fs", ms / 1000.0);
+    return String.format(Locale.US, "%.1fs", ms / 1000.0);
   }
 
   static String getAttemptSummary(TestSummary summary) {
@@ -210,24 +257,32 @@ public class TestSummaryPrinter {
   }
 
   static String getCacheMessage(TestSummary summary) {
-    if (summary.getNumCached() == 0 || summary.getStatus() == BlazeTestStatus.INCOMPLETE) {
-      return "";
+    if (summary.getNumCached() == 0
+        || summary.getStatus() == BlazeTestStatus.INCOMPLETE
+        || summary.getStatus() == BlazeTestStatus.NO_STATUS
+        || summary.getStatus() == BlazeTestStatus.FAILED_TO_BUILD) {
+      return ""; // either no caching, or information isn't useful
     } else if (summary.getNumCached() == summary.totalRuns()) {
       return "(cached) ";
     } else {
-      return String.format("(%d/%d cached) ", summary.getNumCached(), summary.totalRuns());
+      return String.format(
+          Locale.US, "(%d/%d cached) ", summary.getNumCached(), summary.totalRuns());
     }
   }
 
   static String getTimeSummary(TestSummary summary) {
-    if (summary.getTestTimes().isEmpty()) {
-      return "";
+    if (summary.getTestTimes().isEmpty()
+        || summary.getStatus() == BlazeTestStatus.NO_STATUS
+        || summary.getStatus() == BlazeTestStatus.FAILED_TO_BUILD) {
+      return ""; // either no tests ran, or information isn't useful
     } else if (summary.getTestTimes().size() == 1) {
       return " in " + timeInSec(summary.getTestTimes().get(0), TimeUnit.MILLISECONDS);
     } else {
       // We previously used com.google.math for this, which added about 1 MB of deps to the total
       // size. If we re-introduce a dependency on that package, we could revert this change.
-      long min = summary.getTestTimes().get(0).longValue(), max = min, sum = 0;
+      long min = summary.getTestTimes().get(0).longValue();
+      long max = min;
+      long sum = 0;
       double sumOfSquares = 0.0;
       for (Long l : summary.getTestTimes()) {
         long value = l.longValue();
@@ -243,6 +298,7 @@ public class TestSummaryPrinter {
       // distribution of times on the next line.
       String maxTime = timeInSec(max, TimeUnit.MILLISECONDS);
       return String.format(
+          Locale.US,
           " in %s\n  Stats over %d runs: max = %s, min = %s, avg = %s, dev = %s",
           maxTime,
           summary.getTestTimes().size(),

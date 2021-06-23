@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,9 +25,10 @@ import static com.google.devtools.build.android.ziputils.LocalFileHeader.LOCFLG;
 import static com.google.devtools.build.android.ziputils.LocalFileHeader.LOCTIM;
 
 import com.google.devtools.common.options.Option;
+import com.google.devtools.common.options.OptionDocumentationCategory;
+import com.google.devtools.common.options.OptionEffectTag;
+import com.google.devtools.common.options.Options;
 import com.google.devtools.common.options.OptionsBase;
-import com.google.devtools.common.options.OptionsParser;
-
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -72,9 +73,9 @@ public class DexReducer implements EntryHandler {
   }
 
   private void parseArguments(String[] args) {
-    OptionsParser optionsParser = OptionsParser.newOptionsParser(Options.class);
-    optionsParser.parseAndExitUponError(args);
-    Options options = optionsParser.getOptions(Options.class);
+    DexReducerOptions options =
+        Options.parseAndExitUponError(DexReducerOptions.class, /*allowResidue=*/ true, args)
+            .getOptions();
     paths = options.inputZips;
     outFile = options.outputZip;
   }
@@ -99,8 +100,8 @@ public class DexReducer implements EntryHandler {
     String filename = BASENAME + (count == 1 ? "" : Integer.toString(count)) + SUFFIX;
     String comment = dirEntry.getComment();
     byte[] extra = dirEntry.getExtraData();
-    out.nextEntry(dirEntry.clone(filename, extra, comment).set(CENTIM, DosTime.EPOCH.time));
-    out.write(header.clone(filename, extra).set(LOCTIM, DosTime.EPOCH.time));
+    out.nextEntry(dirEntry.clone(filename, extra, comment).set(CENTIM, DosTime.EPOCHISH.time));
+    out.write(header.clone(filename, extra).set(LOCTIM, DosTime.EPOCHISH.time));
     out.write(data);
     if ((header.get(LOCFLG) & LocalFileHeader.SIZE_MASKED_FLAG) != 0) {
       DataDescriptor desc = DataDescriptor.allocate()
@@ -111,23 +112,29 @@ public class DexReducer implements EntryHandler {
     }
   }
 
-  /**
-   * Commandline options.
-   */
-  public static class Options extends OptionsBase {
-    @Option(name = "input_zip",
-        defaultValue = "null",
-        category = "input",
-        allowMultiple = true,
-        abbrev = 'i',
-        help = "Input zip file containing entries to collect and enumerate.")
+  /** Commandline options. */
+  public static class DexReducerOptions extends OptionsBase {
+    @Option(
+      name = "input_zip",
+      defaultValue = "null",
+      category = "input",
+      allowMultiple = true,
+      abbrev = 'i',
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "Input zip file containing entries to collect and enumerate."
+    )
     public List<String> inputZips;
 
-    @Option(name = "output_zip",
-        defaultValue = "null",
-        category = "output",
-        abbrev = 'o',
-        help = "Output zip file, containing enumerated entries.")
+    @Option(
+      name = "output_zip",
+      defaultValue = "null",
+      category = "output",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      abbrev = 'o',
+      help = "Output zip file, containing enumerated entries."
+    )
     public String outputZip;
   }
 }

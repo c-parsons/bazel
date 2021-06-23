@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,14 +18,17 @@ import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Attribute.AllowedValueSet;
+import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.packages.Type.LabelClass;
+import com.google.devtools.build.lib.packages.Type.ListType;
 import com.google.devtools.build.lib.util.FileTypeSet;
-
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -56,8 +59,8 @@ public class BuildRuleWithDefaultsBuilder extends BuildRuleBuilder {
    */
   private String getDummyFileLabel(String rulePkg, String filePkg, String extension,
       Type<?> attrType) {
-    boolean isInput = (attrType == Type.LABEL || attrType == Type.LABEL_LIST);
-    String fileName = (isInput ? "dummy_input" : "dummy_output") + extension;
+    boolean isOutput = attrType.getLabelClass() == LabelClass.OUTPUT;
+    String fileName = (isOutput ? "dummy_output" : "dummy_input") + extension;
     generateFiles.add(filePkg + "/" + fileName);
     if (rulePkg.equals(filePkg)) {
       return ":" + fileName;
@@ -74,32 +77,35 @@ public class BuildRuleWithDefaultsBuilder extends BuildRuleBuilder {
     BuildRuleWithDefaultsBuilder builder = new BuildRuleWithDefaultsBuilder(
         referencedRuleClass.getName(), referencedRuleName, ruleClassMap, generateFiles,
         generateRules);
-    builder.popuplateAttributes(rulePkg, true);
+    builder.populateAttributes(rulePkg, true);
     generateRules.put(referencedRuleClass.getName(), builder);
     return referencedRuleName;
   }
 
-  public BuildRuleWithDefaultsBuilder popuplateLabelAttribute(String pkg, Attribute attribute) {
-    return popuplateLabelAttribute(pkg, pkg, attribute);
+  public BuildRuleWithDefaultsBuilder populateLabelAttribute(String pkg, Attribute attribute) {
+    return populateLabelAttribute(pkg, pkg, attribute);
   }
 
   /**
    * Populates the label type attribute with generated values. Populates with a file if possible, or
    * generates an appropriate rule. Note, that the rules are always generated in the same package.
    */
-  public BuildRuleWithDefaultsBuilder popuplateLabelAttribute(String rulePkg, String filePkg,
+  public BuildRuleWithDefaultsBuilder populateLabelAttribute(String rulePkg, String filePkg,
       Attribute attribute) {
     Type<?> attrType = attribute.getType();
     String label = null;
     if (attribute.getAllowedFileTypesPredicate() != FileTypeSet.NO_FILE) {
       // Try to populate with files first
-      String extension = null;
+      String extension = "";
       if (attribute.getAllowedFileTypesPredicate() == FileTypeSet.ANY_FILE) {
         extension = ".txt";
-      } else {
+      } else if (attribute.getAllowedFileTypesPredicate() != null) {
         FileTypeSet fileTypes = attribute.getAllowedFileTypesPredicate();
         // This argument should always hold, if not that means a Blaze design/implementation error
-        Preconditions.checkArgument(!fileTypes.getExtensions().isEmpty());
+        Preconditions.checkArgument(
+            !fileTypes.getExtensions().isEmpty(),
+            "Attribute %s does not have any allowed file types",
+            attribute.getName());
         extension = fileTypes.getExtensions().get(0);
       }
       label = getDummyFileLabel(rulePkg, filePkg, extension, attrType);
@@ -107,11 +113,11 @@ public class BuildRuleWithDefaultsBuilder extends BuildRuleBuilder {
       Predicate<RuleClass> allowedRuleClasses = attribute.getAllowedRuleClassesPredicate();
       if (allowedRuleClasses != Predicates.<RuleClass>alwaysFalse()) {
         // See if there is an applicable rule among the already enqueued rules
-        BuildRuleBuilder referencedRuleBuilder = getFirstApplicableRule(allowedRuleClasses);
+        BuildRuleBuilder referencedRuleBuilder = getFirstApplicableRule(attribute);
         if (referencedRuleBuilder != null) {
           label = ":" + referencedRuleBuilder.ruleName;
         } else {
-          RuleClass referencedRuleClass = getFirstApplicableRuleClass(allowedRuleClasses);
+          RuleClass referencedRuleClass = getFirstApplicableRuleClass(attribute);
           if (referencedRuleClass != null) {
             // Generate a rule with the appropriate ruleClass and a label for it in
             // the original rule
@@ -121,7 +127,7 @@ public class BuildRuleWithDefaultsBuilder extends BuildRuleBuilder {
       }
     }
     if (label != null) {
-      if (attrType == Type.LABEL_LIST || attrType == Type.OUTPUT_LIST) {
+      if (attrType instanceof ListType<?>) {
         addMultiValueAttributes(attribute.getName(), label);
       } else {
         setSingleValueAttribute(attribute.getName(), label);
@@ -130,60 +136,76 @@ public class BuildRuleWithDefaultsBuilder extends BuildRuleBuilder {
     return this;
   }
 
-  private BuildRuleBuilder getFirstApplicableRule(Predicate<RuleClass> allowedRuleClasses) {
+  private boolean doesRuleClassMatch(Attribute attribute, RuleClass ruleClass) {
+    // The rule class isn't in the allowed list.
+    if (!attribute.getAllowedRuleClassesPredicate().apply(ruleClass)) {
+      return false;
+    }
+
+    // Does this rule class have the correct providers?
+    if (!attribute.getRequiredProviders().acceptsAny()) {
+      // This attribute requires specific providers, so ignore any rule that claims to have every
+      // provider.
+      if (ruleClass.getAdvertisedProviders().canHaveAnyProvider()) {
+        return false;
+      }
+
+      if (!attribute.getRequiredProviders().isSatisfiedBy(ruleClass.getAdvertisedProviders())) {
+        return false;
+      }
+    }
+
+    // Default to accept if nothing else prevents.
+    return true;
+  }
+
+  private BuildRuleBuilder getFirstApplicableRule(Attribute attribute) {
     // There is no direct way to get the set of allowedRuleClasses from the Attribute
     // The Attribute API probably should not be modified for sole testing purposes
-    for (Map.Entry<String, BuildRuleBuilder> entry : generateRules.entrySet()) {
-      if (allowedRuleClasses.apply(ruleClassMap.get(entry.getKey()))) {
-        return entry.getValue();
-      }
-    }
-    return null;
+    Optional<BuildRuleBuilder> result =
+        generateRules.entrySet().stream()
+            .filter(entry -> doesRuleClassMatch(attribute, ruleClassMap.get(entry.getKey())))
+            .map(Map.Entry::getValue)
+            .findFirst();
+    return result.orElse(null);
   }
 
-  private RuleClass getFirstApplicableRuleClass(Predicate<RuleClass> allowedRuleClasses) {
-    // See comments in getFirstApplicableRule(Predicate<RuleClass> allowedRuleClasses)
-    for (RuleClass ruleClass : ruleClassMap.values()) {
-      if (allowedRuleClasses.apply(ruleClass)) {
-        return ruleClass;
-      }
-    }
-    return null;
+  private RuleClass getFirstApplicableRuleClass(Attribute attribute) {
+    Optional<RuleClass> result =
+        ruleClassMap.values().stream()
+            .filter(ruleClass -> doesRuleClassMatch(attribute, ruleClass))
+            .findFirst();
+    return result.orElse(null);
   }
 
-  public BuildRuleWithDefaultsBuilder popuplateStringListAttribute(Attribute attribute) {
+  public BuildRuleWithDefaultsBuilder populateStringListAttribute(Attribute attribute) {
     addMultiValueAttributes(attribute.getName(), "x");
     return this;
   }
 
-  public BuildRuleWithDefaultsBuilder popuplateStringAttribute(Attribute attribute) {
+  public BuildRuleWithDefaultsBuilder populateStringAttribute(Attribute attribute) {
     setSingleValueAttribute(attribute.getName(), "x");
     return this;
   }
 
-  public BuildRuleWithDefaultsBuilder popuplateBooleanAttribute(Attribute attribute) {
+  public BuildRuleWithDefaultsBuilder populateBooleanAttribute(Attribute attribute) {
     setSingleValueAttribute(attribute.getName(), "false");
     return this;
   }
 
-  public BuildRuleWithDefaultsBuilder popuplateIntegerAttribute(Attribute attribute) {
+  public BuildRuleWithDefaultsBuilder populateIntegerAttribute(Attribute attribute) {
     setSingleValueAttribute(attribute.getName(), 1);
     return this;
   }
 
-  public BuildRuleWithDefaultsBuilder popuplateAttributes(String rulePkg, boolean heuristics) {
+  public BuildRuleWithDefaultsBuilder populateAttributes(String rulePkg, boolean heuristics) {
     for (Attribute attribute : ruleClass.getAttributes()) {
       if (attribute.isMandatory()) {
-        if (attribute.getType() == Type.LABEL_LIST || attribute.getType() == Type.OUTPUT_LIST) {
-          if (attribute.isNonEmpty()) {
-            popuplateLabelAttribute(rulePkg, attribute);
-          } else {
-            // TODO(bazel-team): actually here an empty list would be fine, but BuildRuleBuilder
-            // doesn't support that, and it makes little sense anyway
-            popuplateLabelAttribute(rulePkg, attribute);
-          }
-        } else if (attribute.getType() == Type.LABEL || attribute.getType() == Type.OUTPUT) {
-          popuplateLabelAttribute(rulePkg, attribute);
+        if (BuildType.isLabelType(attribute.getType())) {
+          // TODO(bazel-team): actually an empty list would be fine in the case where
+          // attribute instanceof ListType && !attribute.isNonEmpty(), but BuildRuleBuilder
+          // doesn't support that, and it makes little sense anyway
+          populateLabelAttribute(rulePkg, attribute);
         } else {
           // Non label type attributes
           if (attribute.getAllowedValues() instanceof AllowedValueSet) {
@@ -191,13 +213,13 @@ public class BuildRuleWithDefaultsBuilder extends BuildRuleBuilder {
                 ((AllowedValueSet) attribute.getAllowedValues()).getAllowedValues();
             setSingleValueAttribute(attribute.getName(), allowedValues.iterator().next());
           } else if (attribute.getType() == Type.STRING) {
-            popuplateStringAttribute(attribute);
+            populateStringAttribute(attribute);
           } else if (attribute.getType() == Type.BOOLEAN) {
-            popuplateBooleanAttribute(attribute);
+            populateBooleanAttribute(attribute);
           } else if (attribute.getType() == Type.INTEGER) {
-            popuplateIntegerAttribute(attribute);
+            populateIntegerAttribute(attribute);
           } else if (attribute.getType() == Type.STRING_LIST) {
-            popuplateStringListAttribute(attribute);
+            populateStringListAttribute(attribute);
           }
         }
         // TODO(bazel-team): populate for other data types
@@ -211,11 +233,11 @@ public class BuildRuleWithDefaultsBuilder extends BuildRuleBuilder {
   // Heuristics which might help to generate valid rules.
   // This is a bit hackish, but it helps some generated ruleclasses to pass analysis phase.
   private void populateAttributesHeuristics(String rulePkg, Attribute attribute) {
-    if (attribute.getName().equals("srcs") && attribute.getType() == Type.LABEL_LIST) {
+    if (attribute.getName().equals("srcs") && attribute.getType() == BuildType.LABEL_LIST) {
       // If there is a srcs attribute it might be better to populate it even if it's not mandatory
-      popuplateLabelAttribute(rulePkg, attribute);
+      populateLabelAttribute(rulePkg, attribute);
     } else if (attribute.getName().equals("main_class") && attribute.getType() == Type.STRING) {
-      popuplateStringAttribute(attribute);
+      populateStringAttribute(attribute);
     }
   }
 

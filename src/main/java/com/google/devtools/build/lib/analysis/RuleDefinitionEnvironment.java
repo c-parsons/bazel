@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,18 +14,26 @@
 
 package com.google.devtools.build.lib.analysis;
 
-import com.google.devtools.build.lib.syntax.Label;
+import com.google.devtools.build.lib.cmdline.Label;
 
 /**
- * Encapsulates the services available for implementors of the {@link RuleDefinition}
- * interface.
+ * A minimal context available during rule definition, for both native and starlark rules.
+ *
+ * <p>Encapsulates the services available for implementors of the {@link RuleDefinition} interface.
  */
 public interface RuleDefinitionEnvironment {
+
+  /** Returns the name of the tools repository. */
+  String getToolsRepository();
+
   /**
-   * Parses the given string as a label and returns the label, by calling {@link
-   * Label#parseAbsolute}. Instead of throwing a {@link
-   * com.google.devtools.build.lib.syntax.Label.SyntaxException}, it throws an {@link
-   * IllegalArgumentException}, if the parsing fails.
+   * Prepends the tools repository path to the given string and parses the result using {@link
+   * Label#parseAbsoluteUnchecked}.
+   *
+   * <p>TODO(brandjon,twigg): Require override to handle repositoryMapping? Note that
+   * Label.parseAbsoluteUnchecked itself is deprecated because of repositoryMapping!
    */
-  Label getLabel(String labelValue);
+  public default Label getToolsLabel(String labelValue) {
+    return Label.parseAbsoluteUnchecked(getToolsRepository() + labelValue);
+  }
 }

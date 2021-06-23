@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,15 +14,15 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.base.Preconditions;
+import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.packages.PackageIdentifier;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.UnixGlob;
-import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
 /** A value corresponding to a glob. */
@@ -30,17 +30,24 @@ import com.google.devtools.build.skyframe.SkyValue;
 @ThreadSafe
 public final class GlobValue implements SkyValue {
 
-  static final GlobValue EMPTY = new GlobValue(
+  public static final GlobValue EMPTY = new GlobValue(
       NestedSetBuilder.<PathFragment>emptySet(Order.STABLE_ORDER));
 
   private final NestedSet<PathFragment> matches;
 
-  GlobValue(NestedSet<PathFragment> matches) {
+  /**
+   * Create a GlobValue wrapping {@code matches}. {@code matches} must have order
+   * {@link Order#STABLE_ORDER}.
+   */
+  public GlobValue(NestedSet<PathFragment> matches) {
     this.matches = Preconditions.checkNotNull(matches);
+    Preconditions.checkState(matches.getOrder() == Order.STABLE_ORDER,
+        "Only STABLE_ORDER is supported, but got %s", matches.getOrder());
   }
 
   /**
-   * Returns glob matches.
+   * Returns glob matches. The matches will be in a deterministic but unspecified order. If a
+   * particular order is required, the returned iterable should be sorted.
    */
   public NestedSet<PathFragment> getMatches() {
     return matches;
@@ -67,13 +74,17 @@ public final class GlobValue implements SkyValue {
   }
 
   /**
-   * Constructs a {@link SkyKey} for a glob lookup. {@code packageName} is assumed to be an
+   * Constructs a {@link GlobDescriptor} for a glob lookup. {@code packageName} is assumed to be an
    * existing package. Trying to glob into a non-package is undefined behavior.
    *
    * @throws InvalidGlobPatternException if the pattern is not valid.
    */
   @ThreadSafe
-  public static SkyKey key(PackageIdentifier packageId, String pattern, boolean excludeDirs,
+  public static GlobDescriptor key(
+      PackageIdentifier packageId,
+      Root packageRoot,
+      String pattern,
+      boolean excludeDirs,
       PathFragment subdir)
       throws InvalidGlobPatternException {
     if (pattern.indexOf('?') != -1) {
@@ -85,30 +96,22 @@ public final class GlobValue implements SkyValue {
       throw new InvalidGlobPatternException(pattern, error);
     }
 
-    return internalKey(packageId, subdir, pattern, excludeDirs);
+    return internalKey(packageId, packageRoot, subdir, pattern, excludeDirs);
   }
 
   /**
-   * Constructs a {@link SkyKey} for a glob lookup.
+   * Constructs a {@link GlobDescriptor} for a glob lookup.
    *
    * <p>Do not use outside {@code GlobFunction}.
    */
   @ThreadSafe
-  static SkyKey internalKey(PackageIdentifier packageId, PathFragment subdir, String pattern,
+  static GlobDescriptor internalKey(
+      PackageIdentifier packageId,
+      Root packageRoot,
+      PathFragment subdir,
+      String pattern,
       boolean excludeDirs) {
-    return new SkyKey(SkyFunctions.GLOB,
-        new GlobDescriptor(packageId, subdir, pattern, excludeDirs));
-  }
-
-  /**
-   * Constructs a {@link SkyKey} for a glob lookup.
-   *
-   * <p>Do not use outside {@code GlobFunction}.
-   */
-  @ThreadSafe
-  static SkyKey internalKey(GlobDescriptor glob, String subdirName) {
-    return internalKey(glob.packageId, glob.subdir.getRelative(subdirName),
-        glob.pattern, glob.excludeDirs);
+    return GlobDescriptor.create(packageId, packageRoot, subdir, pattern, excludeDirs);
   }
 
   /**

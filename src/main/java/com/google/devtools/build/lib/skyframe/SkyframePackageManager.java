@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,129 +13,77 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
+import com.google.common.base.Preconditions;
+import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.events.ExtendedEventHandler;
+import com.google.devtools.build.lib.packages.CachingPackageLocator;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.Package;
-import com.google.devtools.build.lib.packages.PackageIdentifier;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.pkgcache.PackageManager;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
-import com.google.devtools.build.lib.pkgcache.TargetPatternEvaluator;
-import com.google.devtools.build.lib.pkgcache.TransitivePackageLoader;
+import com.google.devtools.build.lib.pkgcache.QueryTransitivePackagePreloader;
+import com.google.devtools.build.lib.pkgcache.TargetPatternPreloader;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor.SkyframePackageLoader;
-import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.UnixGlob;
-import com.google.devtools.build.skyframe.CyclesReporter;
-
 import java.io.PrintStream;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Skyframe-based package manager.
- *
- * <p>This is essentially a compatibility shim between the native Skyframe and non-Skyframe
- * parts of Blaze and should not be long-lived.
- */
-class SkyframePackageManager implements PackageManager {
-
+class SkyframePackageManager implements PackageManager, CachingPackageLocator {
   private final SkyframePackageLoader packageLoader;
-  private final SkyframeExecutor.SkyframeTransitivePackageLoader transitiveLoader;
-  private final TargetPatternEvaluator patternEvaluator;
+  private final QueryTransitivePackagePreloader transitiveLoader;
   private final AtomicReference<UnixGlob.FilesystemCalls> syscalls;
-  private final AtomicReference<CyclesReporter> skyframeCyclesReporter;
   private final AtomicReference<PathPackageLocator> pkgLocator;
   private final AtomicInteger numPackagesLoaded;
   private final SkyframeExecutor skyframeExecutor;
 
-  public SkyframePackageManager(SkyframePackageLoader packageLoader,
-      SkyframeExecutor.SkyframeTransitivePackageLoader transitiveLoader,
-      TargetPatternEvaluator patternEvaluator,
+  public SkyframePackageManager(
+      SkyframePackageLoader packageLoader,
+      QueryTransitivePackagePreloader transitiveLoader,
       AtomicReference<UnixGlob.FilesystemCalls> syscalls,
-      AtomicReference<CyclesReporter> skyframeCyclesReporter,
       AtomicReference<PathPackageLocator> pkgLocator,
       AtomicInteger numPackagesLoaded,
       SkyframeExecutor skyframeExecutor) {
     this.packageLoader = packageLoader;
     this.transitiveLoader = transitiveLoader;
-    this.patternEvaluator = patternEvaluator;
-    this.skyframeCyclesReporter = skyframeCyclesReporter;
     this.pkgLocator = pkgLocator;
     this.syscalls = syscalls;
     this.numPackagesLoaded = numPackagesLoaded;
     this.skyframeExecutor = skyframeExecutor;
   }
 
-  @Override
-  public Package getLoadedPackage(PackageIdentifier pkgIdentifier) throws NoSuchPackageException {
-    return packageLoader.getLoadedPackage(pkgIdentifier);
-  }
-
   @ThreadSafe
   @Override
-  public Package getPackage(EventHandler eventHandler, PackageIdentifier packageIdentifier)
+  public Package getPackage(ExtendedEventHandler eventHandler, PackageIdentifier packageIdentifier)
       throws NoSuchPackageException, InterruptedException {
-    try {
-      return packageLoader.getPackage(eventHandler, packageIdentifier);
-    } catch (NoSuchPackageException e) {
-      if (e.getPackage() != null) {
-        return e.getPackage();
-      }
-      throw e;
-    }
+    return packageLoader.getPackage(eventHandler, packageIdentifier);
   }
 
   @Override
-  public Target getLoadedTarget(Label label) throws NoSuchPackageException, NoSuchTargetException {
-    return getLoadedPackage(label.getPackageIdentifier()).getTarget(label.getName());
-  }
-
-  @Override
-  public Target getTarget(EventHandler eventHandler, Label label)
+  public Target getTarget(ExtendedEventHandler eventHandler, Label label)
       throws NoSuchPackageException, NoSuchTargetException, InterruptedException {
-    return getPackage(eventHandler, label.getPackageIdentifier()).getTarget(label.getName());
+    return Preconditions.checkNotNull(getPackage(eventHandler, label.getPackageIdentifier()), label)
+        .getTarget(label.getName());
   }
 
   @Override
-  public boolean isTargetCurrent(Target target) {
-    Package pkg = target.getPackage();
-    try {
-      return getLoadedPackage(target.getLabel().getPackageIdentifier()) == pkg;
-    } catch (NoSuchPackageException e) {
-      return false;
-    }
-  }
-
-  @Override
-  public void partiallyClear() {
-    packageLoader.partiallyClear();
-  }
-
-  @Override
-  public PackageManagerStatistics getStatistics() {
+  public PackageManagerStatistics getAndClearStatistics() {
+    int packagesLoaded = numPackagesLoaded.getAndSet(0);
     return new PackageManagerStatistics() {
       @Override
       public int getPackagesLoaded() {
-        return numPackagesLoaded.get();
-      }
-
-      @Override
-      public int getPackagesLookedUp() {
-        return -1;
-      }
-
-      @Override
-      public int getCacheSize() {
-        return -1;
+        return packagesLoaded;
       }
     };
   }
 
   @Override
-  public boolean isPackage(EventHandler eventHandler, PackageIdentifier packageName) {
+  public boolean isPackage(ExtendedEventHandler eventHandler, PackageIdentifier packageName) {
     return getBuildFileForPackage(packageName) != null;
   }
 
@@ -164,12 +112,12 @@ class SkyframePackageManager implements PackageManager {
   }
 
   @Override
-  public TransitivePackageLoader newTransitiveLoader() {
-    return new SkyframeLabelVisitor(transitiveLoader, skyframeCyclesReporter);
+  public QueryTransitivePackagePreloader transitiveLoader() {
+    return transitiveLoader;
   }
 
   @Override
-  public TargetPatternEvaluator getTargetPatternEvaluator() {
-    return patternEvaluator;
+  public TargetPatternPreloader newTargetPatternPreloader() {
+    return new SkyframeTargetPatternEvaluator(skyframeExecutor);
   }
 }

@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,14 +17,18 @@ package com.google.devtools.build.lib.rules.cpp;
 import com.google.devtools.build.lib.actions.Artifact;
 
 /**
- * Something that appears on the command line of the linker. Since we sometimes expand archive
- * files to their constituent object files, we need to keep information whether a certain file
- * contains embedded objects and if so, the list of the object files themselves.
+ * Something that appears on the command line of the linker. Since we sometimes expand archive files
+ * to their constituent object files, we need to keep information whether a certain file contains
+ * embedded objects and if so, the list of the object files themselves.
  */
 public interface LinkerInput {
+
   /**
-   * Returns the artifact that is the input of the linker.
+   * Returns the type of the linker input.
    */
+  ArtifactCategory getArtifactCategory();
+
+  /** Returns the artifact that is the input of the linker. */
   Artifact getArtifact();
 
   /**
@@ -38,14 +42,28 @@ public interface LinkerInput {
    */
   boolean containsObjectFiles();
 
-  /**
-   * Returns whether the input artifact is a fake object file or not.
-   */
-  boolean isFake();
+  default boolean isLinkstamp() {
+    return false;
+  }
 
   /**
    * Return the list of object files included in the input artifact, if there are any. It is
    * legal to call this only when {@link #containsObjectFiles()} returns true.
    */
   Iterable<Artifact> getObjectFiles();
+
+  /**
+   * Returns whether we must keep debug symbols for this input.
+   */
+  boolean isMustKeepDebug();
+
+  /** If true, Bazel will not wrap this input in whole-archive block. */
+  boolean disableWholeArchive();
+
+  /**
+   * Return the identifier for the library. This is used for de-duplication of linker inputs: two
+   * libraries should have the same identifier iff they are in fact the same library but linked in a
+   * different way (e.g. static/dynamic, PIC/no-PIC)
+   */
+  String getLibraryIdentifier();
 }

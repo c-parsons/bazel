@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,49 +16,70 @@ package com.google.devtools.build.lib.runtime;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.actions.AggregatedSpawnMetrics;
+import com.google.devtools.build.lib.actions.SpawnMetrics;
+import java.time.Duration;
 
 /**
  * Aggregates all the critical path components in one object. This allows us to easily access the
  * components data and have a proper toString().
  */
-public class AggregatedCriticalPath<T extends AbstractCriticalPathComponent<?>> {
+public class AggregatedCriticalPath {
+  public static final AggregatedCriticalPath EMPTY =
+      new AggregatedCriticalPath(Duration.ZERO, AggregatedSpawnMetrics.EMPTY, ImmutableList.of());
 
-  private final long totalTime;
-  private final ImmutableList<T> criticalPathComponents;
+  private final Duration totalTime;
+  private final AggregatedSpawnMetrics aggregatedSpawnMetrics;
+  private final ImmutableList<CriticalPathComponent> criticalPathComponents;
 
-  protected AggregatedCriticalPath(long totalTime, ImmutableList<T> criticalPathComponents) {
+  public AggregatedCriticalPath(
+      Duration totalTime,
+      AggregatedSpawnMetrics aggregatedSpawnMetrics,
+      ImmutableList<CriticalPathComponent> criticalPathComponents) {
     this.totalTime = totalTime;
+    this.aggregatedSpawnMetrics = aggregatedSpawnMetrics;
     this.criticalPathComponents = criticalPathComponents;
   }
 
-  /** Total wall time in ms spent running the critical path actions. */
-  public long totalTime() {
+  /** Total wall time spent running the critical path actions. */
+  public Duration totalTime() {
     return totalTime;
   }
 
+  public AggregatedSpawnMetrics getSpawnMetrics() {
+    return aggregatedSpawnMetrics;
+  }
+
   /** Returns a list of all the component stats for the critical path. */
-  public ImmutableList<T> components() {
+  public ImmutableList<CriticalPathComponent> components() {
     return criticalPathComponents;
+  }
+
+  public String getNewStringSummary() {
+    Duration executionWallTime =
+        aggregatedSpawnMetrics.getTotalDuration(SpawnMetrics::executionWallTime);
+    Duration overheadTime =
+        aggregatedSpawnMetrics.getTotalDuration(SpawnMetrics::totalTime).minus(executionWallTime);
+    return String.format(
+        "Critical path %.2fs (setup %.2fs, action wall time %.2fs)",
+        totalTime.toMillis() / 1000.0,
+        overheadTime.toMillis() / 1000.0,
+        executionWallTime.toMillis() / 1000.0);
   }
 
   @Override
   public String toString() {
-    return toString(false);
+    return toString(false, true);
   }
 
-  /**
-   * Returns a summary version of the critical path stats that omits stats that are not useful
-   * to the user.
-   */
-  public String toStringSummary() {
-    return toString(true);
-  }
-
-  private String toString(boolean summary) {
+  private String toString(boolean summary, boolean remote) {
     StringBuilder sb = new StringBuilder("Critical Path: ");
-    double totalMillis = totalTime;
-    sb.append(String.format("%.2f", totalMillis / 1000.0));
+    sb.append(String.format("%.2f", totalTime.toMillis() / 1000.0));
     sb.append("s");
+    if (remote) {
+      sb.append(", ");
+      sb.append(getSpawnMetrics().toString(totalTime(), summary));
+    }
     if (summary || criticalPathComponents.isEmpty()) {
       return sb.toString();
     }
@@ -66,5 +87,20 @@ public class AggregatedCriticalPath<T extends AbstractCriticalPathComponent<?>> 
     Joiner.on("\n  ").appendTo(sb, criticalPathComponents);
     return sb.toString();
   }
-}
 
+  /**
+   * Returns a summary version of the critical path stats that omits stats that are not useful to
+   * the user.
+   */
+  public String toStringSummary() {
+    return toString(true, true);
+  }
+
+  /**
+   * Same as toStringSummary but also omits remote stats. This is to be used in Bazel because
+   * currently the Remote stats are not calculated correctly.
+   */
+  public String toStringSummaryNoRemote() {
+    return toString(true, false);
+  }
+}

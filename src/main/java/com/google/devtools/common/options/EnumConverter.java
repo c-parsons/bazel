@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,12 +14,13 @@
 
 package com.google.devtools.common.options;
 
+import com.google.common.base.Ascii;
 import java.util.Arrays;
 
 /**
  * A converter superclass for converters that parse enums.
  *
- * <p>Just subclass this class, creating a zero aro argument constructor that
+ * <p>Just subclass this class, creating a zero argument constructor that
  * calls {@link #EnumConverter(Class, String)}.
  *
  * <p>This class compares the input string to the string returned by the toString()
@@ -53,7 +54,7 @@ public abstract class EnumConverter<T extends Enum<T>>
   @Override
   public T convert(String input) throws OptionsParsingException {
     for (T value : enumType.getEnumConstants()) {
-      if (value.toString().equalsIgnoreCase(input)) {
+      if (Ascii.equalsIgnoreCase(value.toString(), input)) {
         return value;
       }
     }
@@ -67,8 +68,7 @@ public abstract class EnumConverter<T extends Enum<T>>
    */
   @Override
   public final String getTypeDescription() {
-    return Converters.joinEnglishList(
-        Arrays.asList(enumType.getEnumConstants())).toLowerCase();
+    return Ascii.toLowerCase(
+        Converters.joinEnglishList(Arrays.asList(enumType.getEnumConstants())));
   }
-
 }

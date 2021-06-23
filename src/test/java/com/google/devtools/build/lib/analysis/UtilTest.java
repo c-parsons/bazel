@@ -1,4 +1,4 @@
-// Copyright 2006-2015 Google Inc. All rights reserved.
+// Copyright 2006 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,11 +13,9 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static com.google.common.truth.Truth.assertThat;
 
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -30,7 +28,7 @@ public class UtilTest {
 
   @Test
   public void testContainsHyphen() throws Exception {
-    assertTrue(Util.containsHyphen(new PathFragment("foo/bar/with-hyphen")));
-    assertFalse(Util.containsHyphen(new PathFragment("foo/bar/no/hyphen")));
+    assertThat(Util.containsHyphen(PathFragment.create("foo/bar/with-hyphen"))).isTrue();
+    assertThat(Util.containsHyphen(PathFragment.create("foo/bar/no/hyphen"))).isFalse();
   }
 }

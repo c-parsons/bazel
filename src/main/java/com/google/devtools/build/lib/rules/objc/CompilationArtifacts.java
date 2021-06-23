@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,20 +16,25 @@ package com.google.devtools.build.lib.rules.objc;
 
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import net.starlark.java.eval.StarlarkValue;
 
 /**
  * Artifacts related to compilation. Any rule containing compilable sources will create an instance
  * of this class.
  */
-final class CompilationArtifacts {
+final class CompilationArtifacts implements StarlarkValue {
   static class Builder {
+    // TODO(bazel-team): Should these be sets instead of just iterables?
     private Iterable<Artifact> srcs = ImmutableList.of();
     private Iterable<Artifact> nonArcSrcs = ImmutableList.of();
-    private Optional<Artifact> pchFile;
+    private NestedSetBuilder<Artifact> additionalHdrs = NestedSetBuilder.stableOrder();
+    private Iterable<Artifact> privateHdrs = ImmutableList.of();
+    private Iterable<Artifact> precompiledSrcs = ImmutableList.of();
     private IntermediateArtifacts intermediateArtifacts;
 
     Builder addSrcs(Iterable<Artifact> srcs) {
@@ -42,10 +47,39 @@ final class CompilationArtifacts {
       return this;
     }
 
-    Builder setPchFile(Optional<Artifact> pchFile) {
-      Preconditions.checkState(this.pchFile == null,
-          "pchFile is already set to: %s", this.pchFile);
-      this.pchFile = Preconditions.checkNotNull(pchFile);
+    /**
+     * Adds header artifacts that should be directly accessible to dependers, but aren't specified
+     * in the hdrs attribute. Note that the underlying infrastructure may flatten the nested set.
+     */
+    Builder addAdditionalHdrs(NestedSet<Artifact> additionalHdrs) {
+      this.additionalHdrs.addTransitive(additionalHdrs);
+      return this;
+    }
+
+    /**
+     * Adds header artifacts that should be directly accessible to dependers, but aren't specified
+     * in the hdrs attribute.
+     */
+    Builder addAdditionalHdrs(Iterable<Artifact> additionalHdrs) {
+      this.additionalHdrs.addAll(additionalHdrs);
+      return this;
+    }
+
+    /**
+     * Adds header artifacts that should not be directly accessible to dependers.
+     * {@code privateHdrs} should not be a {@link NestedSet}, as it will be flattened when added.
+     */
+    Builder addPrivateHdrs(Iterable<Artifact> privateHdrs) {
+      this.privateHdrs = Iterables.concat(this.privateHdrs, privateHdrs);
+      return this;
+    }
+
+    /**
+     * Adds precompiled sources (.o files).
+     */
+    Builder addPrecompiledSrcs(Iterable<Artifact> precompiledSrcs) {
+      // TODO(ulfjack): These are ignored *except* for a check below whether they are empty.
+      this.precompiledSrcs = Iterables.concat(this.precompiledSrcs, precompiledSrcs);
       return this;
     }
 
@@ -58,56 +92,62 @@ final class CompilationArtifacts {
 
     CompilationArtifacts build() {
       Optional<Artifact> archive = Optional.absent();
-      if (!Iterables.isEmpty(srcs) || !Iterables.isEmpty(nonArcSrcs)) {
+      if (!Iterables.isEmpty(srcs)
+          || !Iterables.isEmpty(nonArcSrcs)
+          || !Iterables.isEmpty(precompiledSrcs)) {
         archive = Optional.of(intermediateArtifacts.archive());
       }
-      return new CompilationArtifacts(srcs, nonArcSrcs, archive, pchFile);
+      return new CompilationArtifacts(
+          srcs, nonArcSrcs, additionalHdrs.build(), privateHdrs, archive);
     }
   }
 
   private final Iterable<Artifact> srcs;
   private final Iterable<Artifact> nonArcSrcs;
   private final Optional<Artifact> archive;
-  private final Optional<Artifact> pchFile;
-  private final boolean hasSwiftSources;
+  private final NestedSet<Artifact> additionalHdrs;
+  private final Iterable<Artifact> privateHdrs;
 
   private CompilationArtifacts(
       Iterable<Artifact> srcs,
       Iterable<Artifact> nonArcSrcs,
-      Optional<Artifact> archive,
-      Optional<Artifact> pchFile) {
+      NestedSet<Artifact> additionalHdrs,
+      Iterable<Artifact> privateHdrs,
+      Optional<Artifact> archive) {
     this.srcs = Preconditions.checkNotNull(srcs);
     this.nonArcSrcs = Preconditions.checkNotNull(nonArcSrcs);
+    this.additionalHdrs = Preconditions.checkNotNull(additionalHdrs);
+    this.privateHdrs = Preconditions.checkNotNull(privateHdrs);
     this.archive = Preconditions.checkNotNull(archive);
-    this.pchFile = Preconditions.checkNotNull(pchFile);
-    this.hasSwiftSources = Iterables.any(this.srcs, new Predicate<Artifact>() {
-      @Override
-      public boolean apply(Artifact artifact) {
-        return ObjcRuleClasses.SWIFT_SOURCES.matches(artifact.getExecPath());
-      }
-    });
   }
 
-  public Iterable<Artifact> getSrcs() {
+  Iterable<Artifact> getSrcs() {
     return srcs;
   }
 
-  public Iterable<Artifact> getNonArcSrcs() {
+  Iterable<Artifact> getNonArcSrcs() {
     return nonArcSrcs;
   }
 
-  public Optional<Artifact> getArchive() {
-    return archive;
-  }
-
-  public Optional<Artifact> getPchFile() {
-    return pchFile;
+  /** Returns the public headers that aren't included in the hdrs attribute. */
+  NestedSet<Artifact> getAdditionalHdrs() {
+    return additionalHdrs;
   }
 
   /**
-   * Returns true if any of this target's srcs are Swift source files.
+   * Returns the private headers from the srcs attribute, which may by imported by any source or
+   * header in this target, but not by sources or headers of dependers.
    */
-  public boolean hasSwiftSources() {
-    return hasSwiftSources;
+  Iterable<Artifact> getPrivateHdrs() {
+    return privateHdrs;
+  }
+
+  /**
+   * Returns the output archive library (.a) file created by combining object files of the srcs, non
+   * arc srcs, and precompiled srcs of this artifact collection. Returns absent if there are no such
+   * source files for which to create an archive library.
+   */
+  Optional<Artifact> getArchive() {
+    return archive;
   }
 }

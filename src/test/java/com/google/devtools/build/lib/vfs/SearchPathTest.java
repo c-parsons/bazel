@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,20 +17,19 @@ import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
-
+import java.io.OutputStream;
+import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.util.List;
-
 @RunWith(JUnit4.class)
 public class SearchPathTest {
-  private FileSystem fs = new InMemoryFileSystem();
+  private FileSystem fs = new InMemoryFileSystem(DigestHashFunction.SHA256);
 
   @Test
   public void testNull() throws Exception {
-    assertThat(SearchPath.parse(fs, null)).isEqualTo(ImmutableList.of());
+    assertThat(SearchPath.parse(fs, null)).isEmpty();
   }
 
   @Test
@@ -40,14 +39,16 @@ public class SearchPathTest {
     assertThat(SearchPath.parse(fs, "/:/bin")).isEqualTo(searchPath);
     assertThat(SearchPath.parse(fs, ".:/:/bin")).isEqualTo(searchPath);
 
-    fs.getOutputStream(fs.getPath("/bin/exe")).write(new byte[5]);
+    try (OutputStream out = fs.getPath("/bin/exe").getOutputStream()) {
+      out.write(new byte[5]);
+    }
 
-    assertThat(SearchPath.which(searchPath, "exe")).isEqualTo(null);
+    assertThat(SearchPath.which(searchPath, "exe")).isNull();
 
     fs.getPath("/bin/exe").setExecutable(true);
     assertThat(SearchPath.which(searchPath, "exe")).isEqualTo(fs.getPath("/bin/exe"));
 
-    assertThat(SearchPath.which(searchPath, "bin/exe")).isEqualTo(null);
-    assertThat(SearchPath.which(searchPath, "/bin/exe")).isEqualTo(null);
+    assertThat(SearchPath.which(searchPath, "bin/exe")).isNull();
+    assertThat(SearchPath.which(searchPath, "/bin/exe")).isNull();
   }
 }

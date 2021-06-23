@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,8 +13,10 @@
 // limitations under the License.
 package com.google.devtools.build.lib.query2.engine;
 
+import com.google.common.base.Ascii;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryTaskFuture;
 import java.util.Collection;
-import java.util.Set;
 
 /**
  * Base class for expressions in the Blaze query language, revision 2.
@@ -43,32 +45,32 @@ import java.util.Set;
  * different ways of printing out the result of a query.  Each accepts a {@code
  * Digraph} of {@code Target}s, and an output stream.
  */
+@ThreadSafe
 public abstract class QueryExpression {
 
-  /**
-   * Scan and parse the specified query expression.
-   */
+  private static final int MAX_QUERY_EXPRESSION_LOG_CHARS = 1000;
+
+  /** Scan and parse the specified query expression. */
   public static QueryExpression parse(String query, QueryEnvironment<?> env)
-      throws QueryException {
+      throws QuerySyntaxException {
     return QueryParser.parse(query, env);
   }
 
   protected QueryExpression() {}
 
   /**
-   * Evaluates this query in the specified environment, and returns a subgraph,
-   * concretely represented a new (possibly-immutable) set of target nodes.
+   * Returns a {@link QueryTaskFuture} representing the asynchronous evaluation of this query in the
+   * specified environment, notifying the callback with a result. Note that it is allowed to notify
+   * the callback with partial results instead of just one final result.
    *
-   * Failures resulting from evaluation of an ill-formed query cause
-   * QueryException to be thrown.
+   * <p>Failures resulting from evaluation of an ill-formed query cause QueryException to be thrown.
    *
-   * The reporting of failures arising from errors in BUILD files depends on
-   * the --keep_going flag.  If enabled (the default), then QueryException is
-   * thrown.  If disabled, evaluation will stumble on to produce a (possibly
-   * inaccurate) result, but a result nonetheless.
+   * <p>The reporting of failures arising from errors in BUILD files depends on the --keep_going
+   * flag. If enabled (the default), then QueryException is thrown. If disabled, evaluation will
+   * stumble on to produce a (possibly inaccurate) result, but a result nonetheless.
    */
-  public abstract <T> Set<T> eval(QueryEnvironment<T> env)
-      throws QueryException, InterruptedException;
+  public abstract <T> QueryTaskFuture<Void> eval(
+      QueryEnvironment<T> env, QueryExpressionContext<T> context, Callback<T> callback);
 
   /**
    * Collects all target patterns that are referenced anywhere within this query expression and adds
@@ -76,9 +78,38 @@ public abstract class QueryExpression {
    */
   public abstract void collectTargetPatterns(Collection<String> literals);
 
-  /**
-   * Returns this query expression pretty-printed.
-   */
+  /* Implementations should just be {@code return visitor.visit(this, context)}. */
+  public abstract <T, C> T accept(QueryExpressionVisitor<T, C> visitor, C context);
+
+  public final <T> T accept(QueryExpressionVisitor<T, Void> visitor) {
+    return accept(visitor, /*context=*/ null);
+  }
+
+  /** Returns this query expression pretty-printed. */
   @Override
   public abstract String toString();
+
+  /**
+   * Returns this query expression pretty-printed, and truncated to a max of 1000 characters.
+   *
+   * <p>Helpful for preparing text for logging or human-readable display, because query expressions
+   * may be very long.
+   */
+  public final String toTrunctatedString() {
+    return truncate(toString());
+  }
+
+  /**
+   * Truncates the provided string to a max of 1000 characters, in the fashion of {@link
+   * #toTrunctatedString()}.
+   */
+  public static String truncate(String expr) {
+    return Ascii.truncate(expr, MAX_QUERY_EXPRESSION_LOG_CHARS, "[truncated]");
+  }
+
+  /** Checks if this QueryExpression has a SomePathFunction at its top level. */
+  public boolean isTopLevelSomePathFunction() {
+    return this instanceof FunctionExpression
+        && "somepath".equals(((FunctionExpression) this).getFunction().getName());
+  }
 }

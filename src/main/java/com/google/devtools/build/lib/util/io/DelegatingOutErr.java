@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.util.io;
 
+import com.google.common.base.Preconditions;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
@@ -68,7 +69,7 @@ public final class DelegatingOutErr extends OutErr {
     private final List<OutputStream> sinks = new ArrayList<>();
 
     public void addSink(OutputStream sink) {
-      sinks.add(sink);
+      sinks.add(Preconditions.checkNotNull(sink));
     }
 
     public void removeSink(OutputStream sink) {
@@ -84,8 +85,22 @@ public final class DelegatingOutErr extends OutErr {
 
     @Override
     public void close() throws IOException {
+      // Ensure that we close all sinks even if one throws.
+      IOException firstException = null;
       for (OutputStream sink : sinks) {
-        sink.close();
+        try {
+          sink.close();
+        } catch (IOException e) {
+          if (firstException == null) {
+            firstException = e;
+          } else {
+            firstException.addSuppressed(e);
+          }
+        }
+      }
+
+      if (firstException != null) {
+        throw firstException;
       }
     }
 

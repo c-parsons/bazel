@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,18 +14,19 @@
 
 package com.google.devtools.build.lib.query2.engine;
 
+import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.Argument;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.ArgumentType;
-import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryFunction;
-
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.FilteringQueryFunction;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryTaskFuture;
+import com.google.devtools.build.lib.query2.engine.QueryEnvironment.ThreadSafeMutableSet;
 import java.util.List;
 import java.util.Set;
 
 /**
- * A visible(x, y) query expression, which computes the subset of nodes in y
- * that are visible from all nodes in x.
+ * A visible(x, y) query expression, which computes the subset of nodes in y that are visible from
+ * all nodes in x.
  *
  * <pre>expr ::= VISIBILE '(' expr ',' expr ')'</pre>
  *
@@ -35,11 +36,26 @@ import java.util.Set;
  * visible(//foo, //bar/baz:*)
  * </pre>
  */
-public class VisibleFunction implements QueryFunction {
+public class VisibleFunction extends FilteringQueryFunction {
+
+  private final boolean invert;
+
+  VisibleFunction() {
+    this(/*invert=*/ false);
+  }
+
+  private VisibleFunction(boolean invert) {
+    this.invert = invert;
+  }
+
+  @Override
+  public FilteringQueryFunction invert() {
+    return new VisibleFunction(!invert);
+  }
 
   @Override
   public String getName() {
-    return "visible";
+    return (invert ? "no" : "") + "visible";
   }
 
   @Override
@@ -48,43 +64,55 @@ public class VisibleFunction implements QueryFunction {
   }
 
   @Override
+  public int getExpressionToFilterIndex() {
+    return 1;
+  }
+
+  @Override
   public List<ArgumentType> getArgumentTypes() {
     return ImmutableList.of(ArgumentType.EXPRESSION, ArgumentType.EXPRESSION);
   }
 
   @Override
-  public <T> Set<T> eval(QueryEnvironment<T> env, QueryExpression expression, List<Argument> args)
-      throws QueryException, InterruptedException {
-    Set<T> toSet = args.get(0).getExpression().eval(env);
-    Set<T> targets = args.get(1).getExpression().eval(env);
-
-    ImmutableSet.Builder<T> visible = ImmutableSet.builder();
-    for (T target : targets) {
-      if (visibleToAll(env, toSet, target)) {
-        visible.add(target);
-      }
-    }
-    return visible.build();
+  public <T> QueryTaskFuture<Void> eval(
+      final QueryEnvironment<T> env,
+      final QueryExpressionContext<T> context,
+      QueryExpression expression,
+      final List<Argument> args,
+      final Callback<T> callback) {
+    final QueryTaskFuture<ThreadSafeMutableSet<T>> toSetFuture =
+        QueryUtil.evalAll(env, context, args.get(0).getExpression());
+    Function<ThreadSafeMutableSet<T>, QueryTaskFuture<Void>> computeVisibleNodesAsyncFunction =
+        toSet ->
+            env.eval(
+                args.get(1).getExpression(),
+                context,
+                partialResult -> {
+                  for (T t : partialResult) {
+                    if (invert ^ visibleToAll(expression, env, toSet, t)) {
+                      callback.process(ImmutableList.of(t));
+                    }
+                  }
+                });
+    return env.transformAsync(toSetFuture, computeVisibleNodesAsyncFunction);
   }
 
-  /**
-   * Returns true if {@code target} is visible to all targets in {@code toSet}.
-   */
-  private <T> boolean visibleToAll(
-      QueryEnvironment<T> env, Set<T> toSet, T target) throws QueryException {
+  /** Returns true if {@code target} is visible to all targets in {@code toSet}. */
+  private static <T> boolean visibleToAll(
+      QueryExpression caller, QueryEnvironment<T> env, Set<T> toSet, T target)
+      throws QueryException, InterruptedException {
     for (T to : toSet) {
-      if (!visible(env, to, target)) {
+      if (!visible(caller, env, to, target)) {
         return false;
       }
     }
     return true;
   }
 
-  /**
-   * Returns true if the target {@code from} is visible to the target {@code to}.
-   */
-  public <T> boolean visible(QueryEnvironment<T> env, T to, T from) throws QueryException {
-    Set<QueryVisibility<T>> visiblePackages = env.getAccessor().getVisibility(from);
+  /** Returns true if the target {@code from} is visible to the target {@code to}. */
+  public static <T> boolean visible(QueryExpression caller, QueryEnvironment<T> env, T to, T from)
+      throws QueryException, InterruptedException {
+    Set<QueryVisibility<T>> visiblePackages = env.getAccessor().getVisibility(caller, from);
     for (QueryVisibility<T> spec : visiblePackages) {
       if (spec.contains(to)) {
         return true;

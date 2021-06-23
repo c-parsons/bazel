@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,34 +14,11 @@
 
 package com.google.devtools.build.lib.actions;
 
-import com.google.common.annotations.VisibleForTesting;
-
-/**
- * An interface for registering actions.
- */
+/** An interface for registering actions. */
 public interface ActionRegistry {
-  /**
-   * This method notifies the registry new actions.
-   */
-  void registerAction(Action... actions);
+  /** Notifies the registry of a new action. */
+  void registerAction(ActionAnalysisMetadata action);
 
-  /**
-   * Get the (Label and BuildConfiguration) of the ConfiguredTarget ultimately responsible for all
-   * these actions.
-   */
-  ArtifactOwner getOwner();
-
-  /**
-   * An action registry that does exactly nothing.
-   */
-  @VisibleForTesting
-  public static final ActionRegistry NOP = new ActionRegistry() {
-    @Override
-    public void registerAction(Action... actions) {}
-
-    @Override
-    public ArtifactOwner getOwner() {
-      return ArtifactOwner.NULL_OWNER;
-    }
-  };
+  /** Get the key of the ConfiguredTarget/Aspect ultimately responsible for all these actions. */
+  ActionLookupKey getOwner();
 }

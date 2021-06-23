@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,55 +14,71 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
-import static com.google.devtools.build.lib.rules.objc.XcodeProductType.LIBRARY_STATIC;
-
+import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.Type;
-import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
-import com.google.devtools.build.lib.rules.objc.ObjcCommon.CompilationAttributes;
-import com.google.devtools.build.lib.rules.objc.ObjcCommon.ResourceAttributes;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
+import com.google.devtools.build.lib.rules.cpp.CppSemantics;
+import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Implementation for {@code objc_import}.
  */
 public class ObjcImport implements RuleConfiguredTargetFactory {
-  @Override
-  public ConfiguredTarget create(RuleContext ruleContext) throws InterruptedException {
-    ObjcCommon common = new ObjcCommon.Builder(ruleContext)
-        .setCompilationAttributes(new CompilationAttributes(ruleContext))
-        .setResourceAttributes(new ResourceAttributes(ruleContext))
-        .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
-        .setAlwayslink(ruleContext.attributes().get("alwayslink", Type.BOOLEAN))
-        .addExtraImportLibraries(
-            ruleContext.getPrerequisiteArtifacts("archives", Mode.TARGET).list())
-        .addDepObjcProviders(
-            ruleContext.getPrerequisites("bundles", Mode.TARGET, ObjcProvider.class))
-        .build();
+  private final CppSemantics cppSemantics;
 
-    XcodeProvider.Builder xcodeProviderBuilder = new XcodeProvider.Builder();
+  protected ObjcImport(CppSemantics cppSemantics) {
+    this.cppSemantics = cppSemantics;
+  }
+
+  @Override
+  public ConfiguredTarget create(RuleContext ruleContext)
+      throws InterruptedException, RuleErrorException, ActionConflictException {
+
+    CompilationAttributes compilationAttributes =
+        CompilationAttributes.Builder.fromRuleContext(ruleContext).build();
+    IntermediateArtifacts intermediateArtifacts =
+        ObjcRuleClasses.intermediateArtifacts(ruleContext);
+    CompilationArtifacts compilationArtifacts = new CompilationArtifacts.Builder().build();
+
+    ObjcCommon common =
+        new ObjcCommon.Builder(ObjcCommon.Purpose.COMPILE_AND_LINK, ruleContext)
+            .setCompilationArtifacts(compilationArtifacts)
+            .setCompilationAttributes(compilationAttributes)
+            .addDeps(ruleContext.getPrerequisites("deps"))
+            .setIntermediateArtifacts(intermediateArtifacts)
+            .setAlwayslink(ruleContext.attributes().get("alwayslink", Type.BOOLEAN))
+            .setHasModuleMap()
+            .addExtraImportLibraries(ruleContext.getPrerequisiteArtifacts("archives").list())
+            .build();
+
     NestedSetBuilder<Artifact> filesToBuild = NestedSetBuilder.stableOrder();
 
-    new CompilationSupport(ruleContext)
-        .addXcodeSettings(xcodeProviderBuilder, common)
-        .validateAttributes();
+    Map<String, NestedSet<Artifact>> outputGroupCollector = new TreeMap<>();
+    ImmutableList.Builder<Artifact> objectFilesCollector = ImmutableList.builder();
 
-    new ResourceSupport(ruleContext)
-        .validateAttributes()
-        .addXcodeSettings(xcodeProviderBuilder);
+    CompilationSupport compilationSupport =
+        new CompilationSupport.Builder(ruleContext, cppSemantics)
+            .setOutputGroupCollector(outputGroupCollector)
+            .setObjectFilesCollector(objectFilesCollector)
+            .build();
 
-    new XcodeSupport(ruleContext)
-        .addXcodeSettings(xcodeProviderBuilder, common.getObjcProvider(), LIBRARY_STATIC)
-        .addDependencies(xcodeProviderBuilder, new Attribute("bundles", Mode.TARGET))
-        .registerActions(xcodeProviderBuilder.build())
-        .addFilesToBuild(filesToBuild);
+    compilationSupport.registerCompileAndArchiveActions(common).validateAttributes();
 
     return ObjcRuleClasses.ruleConfiguredTarget(ruleContext, filesToBuild.build())
-        .addProvider(XcodeProvider.class, xcodeProviderBuilder.build())
-        .addProvider(ObjcProvider.class, common.getObjcProvider())
+        .addNativeDeclaredProvider(common.getObjcProvider())
+        .addNativeDeclaredProvider(
+            CcInfo.builder()
+                .setCcCompilationContext(compilationSupport.getCcCompilationContext())
+                .build())
+        .addStarlarkTransitiveInfo(ObjcProvider.STARLARK_NAME, common.getObjcProvider())
         .build();
   }
 }

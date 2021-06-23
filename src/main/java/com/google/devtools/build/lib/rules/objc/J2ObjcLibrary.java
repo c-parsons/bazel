@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,21 +15,22 @@
 package com.google.devtools.build.lib.rules.objc;
 
 import static com.google.devtools.build.lib.collect.nestedset.Order.STABLE_ORDER;
-import static com.google.devtools.build.lib.rules.objc.XcodeProductType.LIBRARY_STATIC;
+import static java.util.stream.Collectors.toList;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.Type;
-import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
-import com.google.devtools.build.lib.rules.java.J2ObjcConfiguration;
-import com.google.devtools.build.lib.vfs.PathFragment;
-
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
+import com.google.devtools.build.lib.rules.cpp.CppSemantics;
+import com.google.devtools.build.lib.rules.objc.J2ObjcAspect.J2ObjcCcInfo;
 import java.util.List;
 
 /**
@@ -38,76 +39,75 @@ import java.util.List;
  * linking into the final application bundle. See {@link J2ObjcLibraryBaseRule} for details.
  */
 public class J2ObjcLibrary implements RuleConfiguredTargetFactory {
+  private final CppSemantics cppSemantics;
+
+  protected J2ObjcLibrary(CppSemantics cppSemantics) {
+    this.cppSemantics = cppSemantics;
+  }
 
   public static final String NO_ENTRY_CLASS_ERROR_MSG =
-      "Entry classes must be specified when flag --compilationMode=opt is on in order to"
+      "Entry classes must be specified when flag --compilation_mode=opt is on in order to"
           + " perform J2ObjC dead code stripping.";
 
+  public static final ImmutableList<String> J2OBJC_SUPPORTED_RULES =
+      ImmutableList.of("java_import", "java_library", "java_proto_library", "proto_library");
+
+  private ObjcCommon common(RuleContext ruleContext) throws InterruptedException {
+    List<J2ObjcCcInfo> j2objcCcInfos = ruleContext.getPrerequisites("deps", J2ObjcCcInfo.class);
+    return new ObjcCommon.Builder(ObjcCommon.Purpose.LINK_ONLY, ruleContext)
+        .setCompilationAttributes(
+            CompilationAttributes.Builder.fromRuleContext(ruleContext).build())
+        .addDeps(ruleContext.getPrerequisites("deps"))
+        .addDeps(ruleContext.getPrerequisites("jre_deps"))
+        .addDirectCcCompilationContexts(
+            j2objcCcInfos.stream().map(J2ObjcCcInfo::getCcInfo).collect(toList()))
+        .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
+        .setHasModuleMap()
+        .build();
+  }
+
   @Override
-  public ConfiguredTarget create(RuleContext ruleContext) throws InterruptedException {
+  public ConfiguredTarget create(RuleContext ruleContext)
+      throws InterruptedException, RuleErrorException, ActionConflictException {
     checkAttributes(ruleContext);
 
     if (ruleContext.hasErrors()) {
       return null;
     }
 
-    J2ObjcSrcsProvider j2ObjcSrcsProvider = new J2ObjcSrcsProvider.Builder()
-        .addTransitiveFromDeps(ruleContext)
+    J2ObjcEntryClassProvider j2ObjcEntryClassProvider = new J2ObjcEntryClassProvider.Builder()
+        .addTransitive(ruleContext)
         .addEntryClasses(ruleContext.attributes().get("entry_classes", Type.STRING_LIST))
         .build();
 
-    ObjcProvider.Builder objcProviderBuilder =
-        new ObjcProvider.Builder()
-            .addTransitiveAndPropagate(
-                ruleContext.getPrerequisite("$jre_emul_lib", Mode.TARGET, ObjcProvider.class))
-            .addTransitiveAndPropagate(
-                ruleContext.getPrerequisites("deps", Mode.TARGET, ObjcProvider.class));
+    ObjcCommon common = common(ruleContext);
+    ObjcProvider objcProvider = common.getObjcProvider();
 
-    XcodeProvider.Builder xcodeProviderBuilder = new XcodeProvider.Builder();
-    XcodeSupport xcodeSupport =
-        new XcodeSupport(ruleContext)
-            .addDependencies(xcodeProviderBuilder, new Attribute("$jre_emul_lib", Mode.TARGET))
-            .addDependencies(xcodeProviderBuilder, new Attribute("deps", Mode.TARGET));
+    J2ObjcMappingFileProvider j2ObjcMappingFileProvider =
+        J2ObjcMappingFileProvider.union(
+            ruleContext.getPrerequisites("deps", J2ObjcMappingFileProvider.PROVIDER));
 
-    if (j2ObjcSrcsProvider.hasProtos()) {
-      if (ruleContext.attributes().has("$protobuf_lib", Type.LABEL)) {
-        objcProviderBuilder.addTransitiveAndPropagate(
-            ruleContext.getPrerequisite("$protobuf_lib", Mode.TARGET, ObjcProvider.class));
-        xcodeSupport.addDependencies(
-            xcodeProviderBuilder, new Attribute("$protobuf_lib", Mode.TARGET));
-      } else {
-        // In theory no Bazel rule should ever provide protos, because they're not supported yet.
-        // If we reach here, it's a programming error, not a rule error.
-        throw new IllegalStateException(
-            "Found protos in the dependencies of rule " + ruleContext.getLabel() + ", "
-                + "but protos are not supported in Bazel.");
-      }
-    }
+    CompilationArtifacts moduleMapCompilationArtifacts =
+        new CompilationArtifacts.Builder()
+            .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
+            .build();
 
-    for (J2ObjcSource j2objcSource : j2ObjcSrcsProvider.getSrcs()) {
-      PathFragment genDirHeaderSearchPath =
-          new PathFragment(
-              j2objcSource.getObjcFilePath(), ruleContext.getConfiguration().getGenfilesFragment());
-
-      objcProviderBuilder.addAll(ObjcProvider.HEADER, j2objcSource.getObjcHdrs());
-      objcProviderBuilder.add(ObjcProvider.INCLUDE, j2objcSource.getObjcFilePath());
-      objcProviderBuilder.add(ObjcProvider.INCLUDE, genDirHeaderSearchPath);
-      xcodeProviderBuilder.addHeaders(j2objcSource.getObjcHdrs());
-      xcodeProviderBuilder.addUserHeaderSearchPaths(
-          ImmutableList.of(j2objcSource.getObjcFilePath(), genDirHeaderSearchPath));
-    }
-
-    ObjcProvider objcProvider = objcProviderBuilder.build();
-    xcodeSupport.addXcodeSettings(xcodeProviderBuilder, objcProvider, LIBRARY_STATIC);
+    new CompilationSupport.Builder(ruleContext, cppSemantics)
+        .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
+        .doNotUsePch()
+        .build()
+        .registerGenerateModuleMapAction(moduleMapCompilationArtifacts)
+        .validateAttributes();
 
     return new RuleConfiguredTargetBuilder(ruleContext)
         .setFilesToBuild(NestedSetBuilder.<Artifact>emptySet(STABLE_ORDER))
         .add(RunfilesProvider.class, RunfilesProvider.EMPTY)
-        .addProvider(J2ObjcSrcsProvider.class, j2ObjcSrcsProvider)
-        .addProvider(
-            J2ObjcMappingFileProvider.class, ObjcRuleClasses.j2ObjcMappingFileProvider(ruleContext))
-        .addProvider(ObjcProvider.class, objcProvider)
-        .addProvider(XcodeProvider.class, xcodeProviderBuilder.build())
+        .addNativeDeclaredProvider(j2ObjcEntryClassProvider)
+        .addNativeDeclaredProvider(j2ObjcMappingFileProvider)
+        .addNativeDeclaredProvider(objcProvider)
+        .addNativeDeclaredProvider(
+            CcInfo.builder().setCcCompilationContext(common.getCcCompilationContext()).build())
+        .addStarlarkTransitiveInfo(ObjcProvider.STARLARK_NAME, objcProvider)
         .build();
   }
 
@@ -117,7 +117,7 @@ public class J2ObjcLibrary implements RuleConfiguredTargetFactory {
   }
 
   private static void checkAttributes(RuleContext ruleContext, String attributeName) {
-    if (!ruleContext.attributes().has(attributeName, Type.LABEL_LIST)) {
+    if (!ruleContext.attributes().has(attributeName, BuildType.LABEL_LIST)) {
       return;
     }
 

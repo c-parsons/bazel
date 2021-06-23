@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,115 +15,116 @@
 package com.google.devtools.build.lib.analysis;
 
 import com.google.common.base.Splitter;
-import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.AbstractAction;
+import com.google.devtools.build.lib.actions.ActionContext;
+import com.google.devtools.build.lib.actions.ActionExecutionException;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.ArtifactFactory;
-import com.google.devtools.build.lib.actions.ArtifactOwner;
-import com.google.devtools.build.lib.actions.Executor.ActionContext;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.FailureDetails.WorkspaceStatus;
+import com.google.devtools.build.lib.server.FailureDetails.WorkspaceStatus.Code;
+import com.google.devtools.build.lib.skyframe.WorkspaceInfoFromDiff;
+import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.OptionsUtils;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.common.options.Converter;
 import com.google.devtools.common.options.Option;
+import com.google.devtools.common.options.OptionDocumentationCategory;
+import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
-
+import com.google.devtools.common.options.OptionsParsingException;
+import com.google.devtools.common.options.OptionsProvider;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
+import javax.annotation.Nullable;
 
 /**
  * An action writing the workspace status files.
  *
- * <p>These files represent information about the environment the build was run in. They are used
- * by language-specific build info factories to make the data in them available for individual
+ * <p>These files represent information about the environment the build was run in. They are used by
+ * language-specific build info factories to make the data in them available for individual
  * languages (e.g. by turning them into .h files for C++)
  *
  * <p>The format of these files a list of key-value pairs, one for each line. The key and the value
  * are separated by a space.
  *
- * <p>There are two of these files: volatile and stable. Changes in the volatile file do not
- * cause rebuilds if no other file is changed. This is useful for frequently-changing information
- * that does not significantly affect the build, e.g. the current time.
+ * <p>There are two of these files: volatile and stable. Changes in the volatile file do not cause
+ * rebuilds if no other file is changed. This is useful for frequently-changing information that
+ * does not significantly affect the build, e.g. the current time.
  */
 public abstract class WorkspaceStatusAction extends AbstractAction {
 
-  /**
-   * Options controlling the workspace status command.
-   */
+  /** Options controlling the workspace status command. */
   public static class Options extends OptionsBase {
-    @Option(name = "embed_label",
+    @Option(
+        name = "embed_label",
         defaultValue = "",
-        category = "misc",
+        converter = OneLineStringConverter.class,
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.UNKNOWN},
         help = "Embed source control revision or release label in binary")
     public String embedLabel;
 
-    @Option(name = "workspace_status_command",
+    @Option(
+        name = "workspace_status_command",
         defaultValue = "",
-        category = "misc",
         converter = OptionsUtils.PathFragmentConverter.class,
-        help = "A command invoked at the beginning of the build to provide status "
-            + "information about the workspace in the form of key/value pairs.  "
-            + "See the User's Manual for the full specification.")
+        valueHelp = "<path>",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help =
+            "A command invoked at the beginning of the build to provide status "
+                + "information about the workspace in the form of key/value pairs.  "
+                + "See the User's Manual for the full specification. Also see "
+                + "tools/buildstamp/get_workspace_status for an example.")
     public PathFragment workspaceStatusCommand;
   }
 
-  /**
-   * The type of a workspace status action key.
-   */
+  /** The type of a workspace status action key. */
   public enum KeyType {
     INTEGER,
     STRING,
-    VERBATIM,
   }
 
   /**
-   * Language for keys that should be present in the build info for every language.
+   * Action context required by the workspace status action as well as language-specific actions
+   * that write workspace status artifacts.
    */
-  // TODO(bazel-team): Once this is released, migrate the only place in the depot to use
-  // the BUILD_USERNAME, BUILD_HOSTNAME and BUILD_DIRECTORY keys instead of BUILD_INFO. Then
-  // language-specific build info keys can be removed.
-  public static final String ALL_LANGUAGES = "*";
-
-  /**
-   * Action context required by the actions that write language-specific workspace status artifacts.
-   */
-  public static interface Context extends ActionContext {
+  public interface Context extends ActionContext {
     ImmutableMap<String, Key> getStableKeys();
+
     ImmutableMap<String, Key> getVolatileKeys();
+
+    // TODO(ulfjack): Maybe move these to a separate ActionContext interface?
+    WorkspaceStatusAction.Options getOptions();
+
+    ImmutableMap<String, String> getClientEnv();
+
+    com.google.devtools.build.lib.shell.Command getCommand();
   }
 
-  /**
-   * A key in the workspace status info file.
-   */
+  /** A key in the workspace status info file. */
   public static class Key {
     private final KeyType type;
 
-    /**
-     * Should be set to ALL_LANGUAGES if the key should be present in the build info of every
-     * language.
-     */
-    private final String language;
     private final String defaultValue;
     private final String redactedValue;
 
-    private Key(KeyType type, String language, String defaultValue, String redactedValue) {
+    private Key(KeyType type, String defaultValue, String redactedValue) {
       this.type = type;
-      this.language = language;
       this.defaultValue = defaultValue;
       this.redactedValue = redactedValue;
     }
 
     public KeyType getType() {
       return type;
-    }
-
-    public boolean isInLanguage(String language) {
-      return this.language.equals(ALL_LANGUAGES) || this.language.equals(language);
     }
 
     public String getDefaultValue() {
@@ -134,22 +135,17 @@ public abstract class WorkspaceStatusAction extends AbstractAction {
       return redactedValue;
     }
 
-    public static Key forLanguage(
-        String language, KeyType type, String defaultValue, String redactedValue) {
-      return new Key(type, language, defaultValue, redactedValue);
-    }
-
     public static Key of(KeyType type, String defaultValue, String redactedValue) {
-      return new Key(type, ALL_LANGUAGES, defaultValue, redactedValue);
+      return new Key(type, defaultValue, redactedValue);
     }
   }
 
   /**
    * Parses the output of the workspace status action.
    *
-   * <p>The output is a text file with each line representing a workspace status info key.
-   * The key is the part of the line before the first space and should consist of the characters
-   * [A-Z_] (although this is not checked). Everything after the first space is the value.
+   * <p>The output is a text file with each line representing a workspace status info key. The key
+   * is the part of the line before the first space and should consist of the characters [A-Z_]
+   * (although this is not checked). Everything after the first space is the value.
    */
   public static Map<String, String> parseValues(Path file) throws IOException {
     HashMap<String, String> result = new HashMap<>();
@@ -167,36 +163,61 @@ public abstract class WorkspaceStatusAction extends AbstractAction {
     return ImmutableMap.copyOf(result);
   }
 
+  /** Environment for the {@link Factory} to create the workspace status action. */
+  public interface Environment {
+    Artifact createStableArtifact(String name);
+
+    Artifact createVolatileArtifact(String name);
+  }
+
   /**
-   * Factory for {@link WorkspaceStatusAction}.
+   * Environment for the {@link Factory} to create the dummy workspace status information. This is a
+   * subset of the information provided by CommandEnvironment. However, we cannot reference the
+   * CommandEnvironment from here due to layering.
    */
+  public interface DummyEnvironment {
+    Path getWorkspace();
+
+    /** Returns optional precomputed workspace info to include in the build info event. */
+    @Nullable
+    WorkspaceInfoFromDiff getWorkspaceInfoFromDiff();
+
+    String getBuildRequestId();
+
+    OptionsProvider getOptions();
+  }
+
+  /** Factory for {@link WorkspaceStatusAction}. */
   public interface Factory {
     /**
      * Creates the workspace status action.
      *
-     * <p>If the objects returned for two builds are equals, the workspace status action can be
-     * be reused between them. Note that this only applies to the action object itself (the action
-     * will be unconditionally re-executed on every build)
+     * <p>The action is never re-created, but the same action object is executed on every build. Use
+     * {@link Context} to access any non-hermetic data.
      */
-    WorkspaceStatusAction createWorkspaceStatusAction(
-        ArtifactFactory artifactFactory, ArtifactOwner artifactOwner, Supplier<UUID> buildId);
+    WorkspaceStatusAction createWorkspaceStatusAction(Environment env);
 
     /**
      * Creates a dummy workspace status map. Used in cases where the build failed, so that part of
      * the workspace status is nevertheless available.
      */
-    Map<String, String> createDummyWorkspaceStatus();
+    Map<String, String> createDummyWorkspaceStatus(DummyEnvironment env);
   }
 
-  protected WorkspaceStatusAction(ActionOwner owner,
-      Iterable<Artifact> inputs,
-      Iterable<Artifact> outputs) {
+  private final String workspaceStatusDescription;
+
+  protected WorkspaceStatusAction(
+      ActionOwner owner,
+      NestedSet<Artifact> inputs,
+      ImmutableSet<Artifact> outputs,
+      String workspaceStatusDescription) {
     super(owner, inputs, outputs);
+    this.workspaceStatusDescription = workspaceStatusDescription;
   }
 
   /**
-   * The volatile status artifact containing items that may change even if nothing changed
-   * between the two builds, e.g. current time.
+   * The volatile status artifact containing items that may change even if nothing changed between
+   * the two builds, e.g. current time.
    */
   public abstract Artifact getVolatileStatus();
 
@@ -205,4 +226,35 @@ public abstract class WorkspaceStatusAction extends AbstractAction {
    * build changes, e.g. the name of the user running the build or the hostname.
    */
   public abstract Artifact getStableStatus();
+
+  protected ActionExecutionException createExecutionException(Exception e, Code detailedCode) {
+    String message = "Failed to determine " + workspaceStatusDescription + ": " + e.getMessage();
+    DetailedExitCode code = createDetailedExitCode(message, detailedCode);
+    return new ActionExecutionException(message, e, this, false, code);
+  }
+
+  public static DetailedExitCode createDetailedExitCode(String message, Code detailedCode) {
+    return DetailedExitCode.of(
+        FailureDetail.newBuilder()
+            .setMessage(message)
+            .setWorkspaceStatus(WorkspaceStatus.newBuilder().setCode(detailedCode))
+            .build());
+  }
+
+  /** Converter for {@code --embed_label} which rejects strings that span multiple lines. */
+  public static final class OneLineStringConverter implements Converter<String> {
+
+    @Override
+    public String convert(String input) throws OptionsParsingException {
+      if (input.contains("\n")) {
+        throw new OptionsParsingException("Value must not contain multiple lines");
+      }
+      return input;
+    }
+
+    @Override
+    public String getTypeDescription() {
+      return "a one-line string";
+    }
+  }
 }

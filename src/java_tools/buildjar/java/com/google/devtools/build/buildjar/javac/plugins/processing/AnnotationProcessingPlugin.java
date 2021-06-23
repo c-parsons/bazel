@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,21 +16,16 @@ package com.google.devtools.build.buildjar.javac.plugins.processing;
 
 import com.google.devtools.build.buildjar.javac.plugins.BlazeJavaCompilerPlugin;
 import com.google.devtools.build.buildjar.proto.JavaCompilation.CompilationUnit;
-
 import com.sun.tools.javac.comp.AttrContext;
 import com.sun.tools.javac.comp.Env;
 import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCClassDecl;
 import com.sun.tools.javac.tree.JCTree.JCCompilationUnit;
-
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashSet;
 
-/**
- * A plugin that records information about sources generated during annotation
- * processing.
- */
+/** A plugin that records information about sources generated during annotation processing. */
 public class AnnotationProcessingPlugin extends BlazeJavaCompilerPlugin {
 
   private final HashSet<JCCompilationUnit> toplevels = new HashSet<>();

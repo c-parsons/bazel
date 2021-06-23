@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,17 +14,59 @@
 
 package com.google.devtools.build.lib.bazel.repository;
 
+import com.google.common.base.Optional;
+import com.google.devtools.build.lib.rules.repository.RepositoryFunction.RepositoryFunctionException;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.skyframe.SkyKey;
+import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
 import com.google.devtools.build.skyframe.SkyValue;
-
 import java.io.IOException;
-import java.util.Objects;
+import java.util.Set;
+import net.starlark.java.eval.Starlark;
 
 /**
  * The contents of decompressed archive.
  */
 public class DecompressorValue implements SkyValue {
+
+  /** Implementation of a decompression algorithm. */
+  public interface Decompressor {
+
+    /** Exception reporting about absence of an expected prefix in an archive. */
+    class CouldNotFindPrefixException extends IOException {
+
+      CouldNotFindPrefixException(String prefix, Set<String> availablePrefixes) {
+
+        super(CouldNotFindPrefixException.prepareErrorMessage(prefix, availablePrefixes));
+      }
+
+      private static String prepareErrorMessage(String prefix, Set<String> availablePrefixes) {
+        String error = "Prefix \"" + prefix + "\" was given, but not found in the archive. ";
+        String suggestion = "Here are possible prefixes for this archive: ";
+        String suggestionBody = "";
+
+        if (availablePrefixes.isEmpty()) {
+          suggestion =
+              "We could not find any directory in this archive"
+                  + " (maybe there is no need for `strip_prefix`?)";
+        } else {
+          // Add a list of possible suggestion wrapped with `"` and separated by `, `.
+          suggestionBody = "\"" + String.join("\", \"", availablePrefixes) + "\".";
+        }
+
+        return error + suggestion + suggestionBody;
+      }
+
+      public static Optional<String> maybeMakePrefixSuggestion(PathFragment pathFragment) {
+        return pathFragment.isMultiSegment()
+            ? Optional.of(pathFragment.getSegment(0))
+            : Optional.absent();
+      }
+    }
+
+    Path decompress(DecompressorDescriptor descriptor)
+        throws IOException, RepositoryFunctionException, InterruptedException;
+  }
 
   private final Path directory;
 
@@ -38,15 +80,8 @@ public class DecompressorValue implements SkyValue {
 
   @Override
   public boolean equals(Object other) {
-    if (this == other) {
-      return true;
-    }
-
-    if (other == null || !(other instanceof DecompressorValue)) {
-      return false;
-    }
-
-    return directory.equals(((DecompressorValue) other).directory);
+    return this == other || (other instanceof DecompressorValue
+        && directory.equals(((DecompressorValue) other).directory));
   }
 
   @Override
@@ -54,101 +89,41 @@ public class DecompressorValue implements SkyValue {
     return directory.hashCode();
   }
 
-  public static SkyKey fileKey(
-      String targetKind, String targetName, Path archivePath, Path repositoryPath) {
-    return new SkyKey(
-        FileFunction.NAME,
-        new DecompressorDescriptor(targetKind, targetName, archivePath, repositoryPath));
-  }
-
-  public static SkyKey jarKey(
-      String targetKind, String targetName, Path archivePath, Path repositoryPath) {
-    return new SkyKey(JarFunction.NAME,
-        new DecompressorDescriptor(targetKind, targetName, archivePath, repositoryPath));
-  }
-
-  public static SkyKey key(
-      String targetKind, String targetName, Path archivePath, Path repositoryPath)
-      throws IOException {
+  static Decompressor getDecompressor(Path archivePath)
+      throws RepositoryFunctionException {
     String baseName = archivePath.getBaseName();
-
-    DecompressorDescriptor descriptor =
-        new DecompressorDescriptor(targetKind, targetName, archivePath, repositoryPath);
-
     if (baseName.endsWith(".zip") || baseName.endsWith(".jar") || baseName.endsWith(".war")) {
-      return new SkyKey(ZipFunction.NAME, descriptor);
+      return ZipDecompressor.INSTANCE;
+    } else if (baseName.endsWith(".tar")) {
+      return TarFunction.INSTANCE;
     } else if (baseName.endsWith(".tar.gz") || baseName.endsWith(".tgz")) {
-      return new SkyKey(TarGzFunction.NAME, descriptor);
+      return TarGzFunction.INSTANCE;
+    } else if (baseName.endsWith(".tar.xz") || baseName.endsWith(".txz")) {
+      return TarXzFunction.INSTANCE;
+    } else if (baseName.endsWith(".tar.bz2")) {
+      return TarBz2Function.INSTANCE;
     } else {
-      throw new IOException(
-          String.format("Expected %s %s to create file with a .zip, .jar, .war, .tar.gz, or .tgz"
-              + " suffix (got %s)", targetKind, targetName, archivePath));
+      throw new RepositoryFunctionException(
+          Starlark.errorf(
+              "Expected a file with a .zip, .jar, .war, .tar, .tar.gz, .tgz, .tar.xz, .txz, or "
+                  + ".tar.bz2 suffix (got %s)",
+              archivePath),
+          Transience.PERSISTENT);
     }
   }
 
-  /**
-   * Description of an archive to be decompressed for use in a SkyKey.
-   * TODO(bazel-team): this should be an autovalue class.
-   */
-  public static class DecompressorDescriptor {
-    private final String targetKind;
-    private final String targetName;
-    private final Path archivePath;
-    private final Path repositoryPath;
-
-    public DecompressorDescriptor(String targetKind, String targetName, Path archivePath,
-        Path repositoryPath) {
-      this.targetKind = targetKind;
-      this.targetName = targetName;
-      this.archivePath = archivePath;
-      this.repositoryPath = repositoryPath;
-    }
-
-    public String targetKind() {
-      return targetKind;
-    }
-
-    public String targetName() {
-      return targetName;
-    }
-
-    public Path archivePath() {
-      return archivePath;
-    }
-
-    public Path repositoryPath() {
-      return repositoryPath;
-    }
-
-    @Override
-    public boolean equals(Object other) {
-      if (this == other) {
-        return true;
-      }
-
-      if (other == null || !(other instanceof DecompressorDescriptor)) {
-        return false;
-      }
-
-      DecompressorDescriptor descriptor = (DecompressorDescriptor) other;
-      return targetKind.equals(descriptor.targetKind)
-          && targetName.equals(descriptor.targetName)
-          && archivePath.equals(descriptor.archivePath)
-          && repositoryPath.equals(descriptor.repositoryPath);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(targetKind, targetName, archivePath, repositoryPath);
-    }
-  }
-
-  /**
-   * Exceptions thrown when something goes wrong decompressing an archive.
-   */
-  static class DecompressorException extends Exception {
-    public DecompressorException(String message) {
-      super(message);
+  public static Path decompress(DecompressorDescriptor descriptor)
+      throws RepositoryFunctionException, InterruptedException {
+    try {
+      return descriptor.getDecompressor().decompress(descriptor);
+    } catch (IOException e) {
+      Path destinationDirectory = descriptor.archivePath().getParentDirectory();
+      throw new RepositoryFunctionException(
+          new IOException(
+              String.format(
+                  "Error extracting %s to %s: %s",
+                  descriptor.archivePath(), destinationDirectory, e.getMessage())),
+          Transience.TRANSIENT);
     }
   }
 }

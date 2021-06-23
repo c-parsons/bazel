@@ -1,14 +1,11 @@
-package(default_visibility = ["//visibility:public"])
+package(default_visibility = ["//src/tools/android/java/com/google/devtools/build/android:__pkg__"])
 
-android_library(
-    name = "stub_application",
-    srcs = [
-        "IncrementalClassLoader.java",
-        "StubApplication.java",
-    ],
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]),
 )
 
-android_library(
-    name = "split_stub_application",
-    srcs = ["Placeholder.java"],
+filegroup(
+    name = "embedded_tools",
+    srcs = glob(["*.java"]) + ["BUILD.tools"],
 )

@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,13 @@
 package com.google.devtools.build.lib.bazel.rules.python;
 
 import static com.google.devtools.build.lib.packages.Attribute.attr;
-import static com.google.devtools.build.lib.packages.Type.LABEL_LIST;
+import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
 
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.bazel.rules.python.BazelPyRuleClasses.PyBaseRule;
 import com.google.devtools.build.lib.packages.RuleClass;
+import com.google.devtools.build.lib.rules.python.PyRuleClasses;
 import com.google.devtools.build.lib.rules.python.PythonConfiguration;
 
 /**
@@ -31,31 +32,15 @@ public final class BazelPyLibraryRule implements RuleDefinition {
   public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
     return builder
         .requiresConfigurationFragments(PythonConfiguration.class)
-        /* <!-- #BLAZE_RULE(py_library).ATTRIBUTE(deps) -->
-        The list of other libraries to be linked in to the library target.
-        ${SYNOPSIS}
-        See general comments about <code>deps</code>
-        at <a href="#common-attributes">Attributes common to all build rules</a>.
-        In practice, these arguments are treated like those in <code>srcs</code>;
-        you may move items between these lists willy-nilly.  It's probably more
-        readable to keep your <code>.py</code> files in your <code>srcs</code>.
-        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-
-        /* <!-- #BLAZE_RULE(py_library).ATTRIBUTE(data) -->
-        The list of files needed by this library at runtime.
-        ${SYNOPSIS}
-        See general comments about <code>data</code>
-        at <a href="#common-attributes">Attributes common to all build rules</a>.
-        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
 
         /* <!-- #BLAZE_RULE(py_library).ATTRIBUTE(srcs) -->
-        The list of source files that are processed to create the target.
-        ${SYNOPSIS}
+        The list of source (<code>.py</code>) files that are processed to create the target.
         This includes all your checked-in code and any generated source files.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-        .add(attr("srcs", LABEL_LIST)
-            .direct_compile_time_input()
-            .allowedFileTypes(BazelPyRuleClasses.PYTHON_SOURCE))
+        .add(
+            attr("srcs", LABEL_LIST)
+                .direct_compile_time_input()
+                .allowedFileTypes(PyRuleClasses.PYTHON_SOURCE))
         .build();
   }
 
@@ -70,9 +55,5 @@ public final class BazelPyLibraryRule implements RuleDefinition {
 }
 
 /*<!-- #BLAZE_RULE (NAME = py_library, TYPE = LIBRARY, FAMILY = Python) -->
-
-${ATTRIBUTE_SIGNATURE}
-
-${ATTRIBUTE_DEFINITION}
 
 <!-- #END_BLAZE_RULE -->*/

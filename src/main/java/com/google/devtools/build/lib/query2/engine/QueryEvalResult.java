@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,44 +14,63 @@
 
 package com.google.devtools.build.lib.query2.engine;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
-import java.util.Set;
+import com.google.devtools.build.lib.util.DetailedExitCode;
 
 /**
- * The result of a query evaluation, containing a set of elements.
- *
- * @param <T> the node type of the elements.
+ * Information about the query evaluation, like if it was successful and number of elements
+ * returned.
  */
-public class QueryEvalResult<T> {
+public class QueryEvalResult {
 
-  protected final boolean success;
-  protected final Set<T> resultSet;
+  private final boolean success;
+  private final boolean empty;
+  private final DetailedExitCode detailedExitCode;
 
-  public QueryEvalResult(
-      boolean success, Set<T> resultSet) {
+  QueryEvalResult(boolean success, boolean empty, DetailedExitCode detailedExitCode) {
+    checkNotNull(detailedExitCode);
+    checkArgument(
+        !success || detailedExitCode.isSuccess(),
+        "successful query evaluations should not have non-success exit codes. detailedExitCode=%s",
+        detailedExitCode);
     this.success = success;
-    this.resultSet = Preconditions.checkNotNull(resultSet);
+    this.empty = empty;
+    this.detailedExitCode = detailedExitCode;
+  }
+
+  public static QueryEvalResult success(boolean empty) {
+    return new QueryEvalResult(true, empty, DetailedExitCode.success());
+  }
+
+  public static QueryEvalResult failure(boolean empty, DetailedExitCode detailedExitCode) {
+    return new QueryEvalResult(false, empty, detailedExitCode);
   }
 
   /**
-   * Whether the query was successful. This can only be false if the query was run with
-   * <code>keep_going</code>, otherwise evaluation will throw a {@link QueryException}.
+   * Whether the query was successful. This can only be false if the query was run with {@code
+   * keep_going}, otherwise evaluation will throw a {@link QueryException}.
    */
   public boolean getSuccess() {
     return success;
   }
 
+  /** True if the query did not return any result; */
+  public boolean isEmpty() {
+    return empty;
+  }
+
   /**
-   * Returns the result as a set of targets.
+   * Returns {@link DetailedExitCode#success()} if successful, and otherwise a {@link
+   * DetailedExitCode} describing the failure if unsuccessful.
    */
-  public Set<T> getResultSet() {
-    return resultSet;
+  public DetailedExitCode getDetailedExitCode() {
+    return detailedExitCode;
   }
 
   @Override
   public String toString() {
-    return (getSuccess() ? "Successful" : "Unsuccessful") + ", result size = "
-        + getResultSet().size() + ", " + getResultSet();
+    return (getSuccess() ? "Successful" : "Unsuccessful") + ", empty = " + empty;
   }
 }

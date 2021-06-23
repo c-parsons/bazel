@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,16 +13,13 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.collect.nestedset.NestedSet;
-import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.common.collect.Iterables;
 import com.google.devtools.build.skyframe.SkyFunctionException.ReifiedSkyFunctionException;
-
-import java.io.Serializable;
 import java.util.Collection;
-
+import java.util.Objects;
 import javax.annotation.Nullable;
 
 /**
@@ -30,99 +27,149 @@ import javax.annotation.Nullable;
  *
  * <p>This is intended only for use in alternative {@code MemoizingEvaluator} implementations.
  */
-public class ErrorInfo implements Serializable {
-  /**
-   * The set of descendants of this value that failed to build
-   */
-  private final NestedSet<SkyKey> rootCauses;
+public class ErrorInfo {
 
-  /**
-   * An exception thrown upon a value's failure to build. The exception is used for reporting, and
-   * thus may ultimately be rethrown by the caller. As well, during a --nokeep_going evaluation, if
-   * an error value is encountered from an earlier --keep_going build, the exception to be thrown is
-   * taken from here.
-   */
-  @Nullable private final Exception exception;
-  private final SkyKey rootCauseOfException;
-
-  private final Iterable<CycleInfo> cycles;
-
-  private final boolean isTransient;
-  private final boolean isCatastrophic;
-
-  public ErrorInfo(ReifiedSkyFunctionException builderException) {
-    this.rootCauseOfException = builderException.getRootCauseSkyKey();
-    this.rootCauses = NestedSetBuilder.create(Order.STABLE_ORDER, rootCauseOfException);
-    this.exception = Preconditions.checkNotNull(builderException.getCause(), builderException);
-    this.cycles = ImmutableList.of();
-    this.isTransient = builderException.isTransient();
-    this.isCatastrophic = builderException.isCatastrophic();
+  /** Create an ErrorInfo from a {@link ReifiedSkyFunctionException}. */
+  public static ErrorInfo fromException(
+      ReifiedSkyFunctionException skyFunctionException, boolean isTransitivelyTransient) {
+    Exception rootCauseException = skyFunctionException.getCause();
+    return new ErrorInfo(
+        Preconditions.checkNotNull(rootCauseException, "Cause is null"),
+        /*cycles=*/ ImmutableList.of(),
+        skyFunctionException.isTransient(),
+        isTransitivelyTransient || skyFunctionException.isTransient(),
+        skyFunctionException.isCatastrophic());
   }
 
-  ErrorInfo(CycleInfo cycleInfo) {
-    this.rootCauses = NestedSetBuilder.emptySet(Order.STABLE_ORDER);
-    this.exception = null;
-    this.rootCauseOfException = null;
-    this.cycles = ImmutableList.of(cycleInfo);
-    this.isTransient = false;
-    this.isCatastrophic = false;
+  /** Create an ErrorInfo from a {@link CycleInfo}. */
+  public static ErrorInfo fromCycle(CycleInfo cycleInfo) {
+    return new ErrorInfo(
+        /*exception=*/ null,
+        ImmutableList.of(cycleInfo),
+        /*isDirectlyTransient=*/ false,
+        /*isTransitivelyTransient=*/ false,
+        /* isCatastrophic= */ false);
   }
 
-  public ErrorInfo(SkyKey currentValue, Collection<ErrorInfo> childErrors) {
-    Preconditions.checkNotNull(currentValue);
-    Preconditions.checkState(!childErrors.isEmpty(),
-        "Error value %s with no exception must depend on another error value", currentValue);
-    NestedSetBuilder<SkyKey> builder = NestedSetBuilder.stableOrder();
+  /** Create an ErrorInfo from a collection of existing errors. */
+  public static ErrorInfo fromChildErrors(SkyKey currentValue, Collection<ErrorInfo> childErrors) {
+    Preconditions.checkNotNull(currentValue, "currentValue must not be null");
+    Preconditions.checkState(
+        !childErrors.isEmpty(), "childErrors may not be empty %s", currentValue);
+
     ImmutableList.Builder<CycleInfo> cycleBuilder = ImmutableList.builder();
     Exception firstException = null;
-    SkyKey firstChildKey = null;
-    boolean isTransient = false;
+    boolean isTransitivelyTransient = false;
     boolean isCatastrophic = false;
-    // Arbitrarily pick the first error.
     for (ErrorInfo child : childErrors) {
       if (firstException == null) {
+        // Arbitrarily pick the first error.
         firstException = child.getException();
-        firstChildKey = child.getRootCauseOfException();
       }
-      builder.addTransitive(child.rootCauses);
       cycleBuilder.addAll(CycleInfo.prepareCycles(currentValue, child.cycles));
-      isTransient |= child.isTransient();
+      isTransitivelyTransient |= child.isTransitivelyTransient();
       isCatastrophic |= child.isCatastrophic();
     }
-    this.rootCauses = builder.build();
-    this.exception = firstException;
-    this.rootCauseOfException = firstChildKey;
-    this.cycles = cycleBuilder.build();
-    this.isTransient = isTransient;
+
+    return new ErrorInfo(
+        firstException,
+        cycleBuilder.build(),
+        /*isDirectlyTransient=*/ false,
+        isTransitivelyTransient,
+        isCatastrophic);
+  }
+
+  @Nullable private final Exception exception;
+
+  private final ImmutableList<CycleInfo> cycles;
+
+  private final boolean isDirectlyTransient;
+  private final boolean isTransitivelyTransient;
+  private final boolean isCatastrophic;
+
+  public ErrorInfo(
+      @Nullable Exception exception,
+      ImmutableList<CycleInfo> cycles,
+      boolean isDirectlyTransient,
+      boolean isTransitivelyTransient,
+      boolean isCatastrophic) {
+    Preconditions.checkState(exception != null || !Iterables.isEmpty(cycles),
+        "At least one of exception and cycles must be non-null/empty, respectively");
+
+    this.exception = exception;
+    this.cycles = cycles;
+    this.isDirectlyTransient = isDirectlyTransient;
+    this.isTransitivelyTransient = isTransitivelyTransient;
     this.isCatastrophic = isCatastrophic;
   }
 
   @Override
-  public String toString() {
-    return String.format("<ErrorInfo exception=%s rootCauses=%s cycles=%s>",
-        exception, rootCauses, cycles);
+  public boolean equals(Object obj) {
+    if (this == obj) {
+      return true;
+    }
+    if (!(obj instanceof ErrorInfo)) {
+      return false;
+    }
+
+    ErrorInfo other = (ErrorInfo) obj;
+
+    if (!Objects.equals(cycles, other.cycles)) {
+      return false;
+    }
+
+    // Don't check the specific exception as most exceptions don't implement equality but at least
+    // check their types and messages are the same.
+    if (exception != other.exception) {
+      if (exception == null || other.exception == null) {
+        return false;
+      }
+      // Class objects are singletons with a single class loader.
+      if (exception.getClass() != other.exception.getClass()) {
+        return false;
+      }
+      if (!Objects.equals(exception.getMessage(), other.exception.getMessage())) {
+        return false;
+      }
+    }
+
+    return isDirectlyTransient == other.isDirectlyTransient
+        && isTransitivelyTransient == other.isTransitivelyTransient
+        && isCatastrophic == other.isCatastrophic;
   }
 
-  /**
-   * The root causes of a value that failed to build are its descendant values that failed to build.
-   * If a value's descendants all built successfully, but it failed to, its root cause will be
-   * itself. If a value depends on a cycle, but has no other errors, this method will return
-   * the empty set.
-   */
-  public Iterable<SkyKey> getRootCauses() {
-    return rootCauses;
+  @Override
+  public int hashCode() {
+    return Objects.hash(
+        exception == null ? null : exception.getClass(),
+        exception == null ? "" : exception.getMessage(),
+        cycles,
+        isDirectlyTransient,
+        isTransitivelyTransient,
+        isCatastrophic);
+  }
+
+  @Override
+  public String toString() {
+    return MoreObjects.toStringHelper(this)
+        .add("exception", exception)
+        .add("cycles", cycles)
+        .add("isCatastrophic", isCatastrophic)
+        .add("isDirectlyTransient", isDirectlyTransient)
+        .add("isTransitivelyTransient", isTransitivelyTransient)
+        .toString();
   }
 
   /**
    * The exception thrown when building a value. May be null if value's only error is depending
    * on a cycle.
+   *
+   * <p>The exception is used for reporting and thus may ultimately be rethrown by the caller.
+   * As well, during a --nokeep_going evaluation, if an error value is encountered from an earlier
+   * --keep_going build, the exception to be thrown is taken from here.
    */
   @Nullable public Exception getException() {
     return exception;
-  }
-
-  public SkyKey getRootCauseOfException() {
-    return rootCauseOfException;
   }
 
   /**
@@ -134,18 +181,25 @@ public class ErrorInfo implements Serializable {
    * path is returned here. However, if there are multiple paths to the same cycle, each of which
    * goes through a different child, each of them is returned here.
    */
-  public Iterable<CycleInfo> getCycleInfo() {
+  public ImmutableList<CycleInfo> getCycleInfo() {
     return cycles;
   }
 
   /**
-   * Returns true iff the error is transient, i.e. if retrying the same computation could lead to a
-   * different result.
+   * Returns true iff the error is directly transient, i.e. if there was a transient error
+   * encountered during the computation itself.
    */
-  public boolean isTransient() {
-    return isTransient;
+  public boolean isDirectlyTransient() {
+    return isDirectlyTransient;
   }
 
+  /**
+   * Returns true iff the error is transitively transient, i.e. if retrying the same computation
+   * could lead to a different result.
+   */
+  public boolean isTransitivelyTransient() {
+    return isTransitivelyTransient;
+  }
 
   /**
    * Returns true iff the error is catastrophic, i.e. it should halt even for a keepGoing update()
@@ -154,4 +208,5 @@ public class ErrorInfo implements Serializable {
   public boolean isCatastrophic() {
     return isCatastrophic;
   }
+
 }

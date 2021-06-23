@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,9 +16,7 @@ package com.google.devtools.build.lib.rules.objc;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleContext;
-
 import java.util.Locale;
 
 /**
@@ -39,7 +37,7 @@ public enum ArtifactListAttribute {
     if (context.attributes().getAttributeDefinition(attrName()) == null) {
       return ImmutableList.of();
     } else {
-      return context.getPrerequisiteArtifacts(attrName(), Mode.TARGET).list();
+      return context.getPrerequisiteArtifacts(attrName()).list();
     }
   }
 }

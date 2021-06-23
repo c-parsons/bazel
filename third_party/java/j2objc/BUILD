@@ -1,4 +1,4 @@
-# Copyright 2015 Google Inc. All rights reserved.
+# Copyright 2015 The Bazel Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,16 @@ package(
     default_visibility = ["//visibility:public"],
 )
 
-java_library(
-    name = "annotations",
-    srcs = ["@bazel-j2objc//:annotations"],
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]),
+    visibility = ["//third_party:__pkg__"],
+)
+
+filegroup(
+    name = "embedded_tools_srcs",
+    srcs = [
+        "BUILD.remote",
+        "BUILD.tools",
+    ],
 )

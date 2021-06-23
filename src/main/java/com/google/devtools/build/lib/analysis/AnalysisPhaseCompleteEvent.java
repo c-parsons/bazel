@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,8 +14,11 @@
 
 package com.google.devtools.build.lib.analysis;
 
-import com.google.common.collect.ImmutableList;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.devtools.build.lib.pkgcache.PackageManager.PackageManagerStatistics;
 
+import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.actions.TotalAndConfiguredTargetOnlyMetric;
 import java.util.Collection;
 
 /**
@@ -23,37 +26,58 @@ import java.util.Collection;
  */
 public class AnalysisPhaseCompleteEvent {
 
-  private final Collection<ConfiguredTarget> targets;
+  private final Collection<ConfiguredTarget> topLevelTargets;
   private final long timeInMs;
-  private int targetsVisited;
+  private final TotalAndConfiguredTargetOnlyMetric targetsConfigured;
+  private final PackageManagerStatistics pkgManagerStats;
+  private final TotalAndConfiguredTargetOnlyMetric actionsConstructed;
+  private final boolean analysisCacheDropped;
 
-  /**
-   * Construct the event.
-   * @param targets The set of active targets that remain.
-   */
-  public AnalysisPhaseCompleteEvent(Collection<? extends ConfiguredTarget> targets,
-      int targetsVisited, long timeInMs) {
+  public AnalysisPhaseCompleteEvent(
+      Collection<? extends ConfiguredTarget> topLevelTargets,
+      TotalAndConfiguredTargetOnlyMetric targetsConfigured,
+      TotalAndConfiguredTargetOnlyMetric actionsConstructed,
+      long timeInMs,
+      PackageManagerStatistics pkgManagerStats,
+      boolean analysisCacheDropped) {
     this.timeInMs = timeInMs;
-    this.targets = ImmutableList.copyOf(targets);
-    this.targetsVisited = targetsVisited;
+    this.topLevelTargets = ImmutableList.copyOf(topLevelTargets);
+    this.targetsConfigured = checkNotNull(targetsConfigured);
+    this.pkgManagerStats = pkgManagerStats;
+    this.actionsConstructed = checkNotNull(actionsConstructed);
+    this.analysisCacheDropped = analysisCacheDropped;
   }
 
   /**
-   * @return The set of active targets remaining, which is a subset
-   *     of the targets we attempted to analyze.
+   * Returns the set of active topLevelTargets remaining, which is a subset of the topLevelTargets
+   * we attempted to analyze.
    */
-  public Collection<ConfiguredTarget> getTargets() {
-    return targets;
+  public Collection<ConfiguredTarget> getTopLevelTargets() {
+    return topLevelTargets;
   }
 
-  /**
-   * @return The number of targets freshly visited during analysis
-   */
-  public int getTargetsVisited() {
-    return targetsVisited;
+  /** Returns the number of targets/aspects configured during analysis. */
+  public TotalAndConfiguredTargetOnlyMetric getTargetsConfigured() {
+    return targetsConfigured;
   }
 
   public long getTimeInMs() {
     return timeInMs;
+  }
+
+  /** Returns the actions constructed during this analysis. */
+  public TotalAndConfiguredTargetOnlyMetric getActionsConstructed() {
+    return actionsConstructed;
+  }
+
+  public boolean wasAnalysisCacheDropped() {
+    return analysisCacheDropped;
+  }
+
+  /**
+   * Returns package manager statistics.
+   */
+  public PackageManagerStatistics getPkgManagerStats() {
+    return pkgManagerStats;
   }
 }

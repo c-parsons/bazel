@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2015 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,17 +15,15 @@ package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
+import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.cmdline.ResolvedTargets;
-import com.google.devtools.build.lib.cmdline.TargetParsingException;
-import com.google.devtools.build.lib.packages.NoSuchPackageException;
+import com.google.devtools.build.lib.collect.compacthashset.CompactHashSet;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.Package;
-import com.google.devtools.build.lib.packages.PackageIdentifier;
 import com.google.devtools.build.lib.packages.Target;
-import com.google.devtools.build.lib.syntax.Label;
-import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.WalkableGraph;
-
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -34,27 +32,14 @@ import java.util.Set;
  * This class encapsulates logic behind computing final target set based on separate results from a
  * list of target patterns (eg, //foo:all -//bar/... //foo:test).
  */
-abstract class TargetPatternsResultBuilder {
-  private Map<PackageIdentifier, Package> packages = null;
-  private boolean hasError = false;
+class TargetPatternsResultBuilder {
+  private final Set<Label> resolvedLabelsBuilder = CompactHashSet.create();
+  private Map<PackageIdentifier, Package> packages;
 
-  /**
-   * Sets that there was an error, during evaluation. 
-   */
-  public void setError() {
-    hasError = true;
-  }
-
-  /**
-   * Returns final set of targets and sets error flag if required.
-   */
-  public ResolvedTargets<Target> build(WalkableGraph walkableGraph) throws TargetParsingException {
+  /** Returns final set of targets and sets error flag if required. */
+  public Collection<Target> build(WalkableGraph walkableGraph) throws InterruptedException {
     precomputePackages(walkableGraph);
-    ResolvedTargets.Builder<Target> resolvedTargetsBuilder = buildInternal();
-    if (hasError) {
-      resolvedTargetsBuilder.setError();
-    }
-    return resolvedTargetsBuilder.build();
+    return transformLabelsIntoTargets(resolvedLabelsBuilder);
   }
 
   /**
@@ -62,21 +47,17 @@ abstract class TargetPatternsResultBuilder {
    * method is using information about packages, so {@link #precomputePackages} has to be called
    * before this method.
    */
-  protected ResolvedTargets.Builder<Target> transformLabelsIntoTargets(
-      ResolvedTargets<Label> resolvedLabels) {
+  private Collection<Target> transformLabelsIntoTargets(Set<Label> resolvedLabels) {
     // precomputePackages has to be called before this method.
-    ResolvedTargets.Builder<Target> resolvedTargetsBuilder = ResolvedTargets.builder();
+    Set<Target> targets = CompactHashSet.create();
     Preconditions.checkNotNull(packages);
-    for (Label label : resolvedLabels.getTargets()) {
-      resolvedTargetsBuilder.add(getExistingTarget(label));
+    for (Label label : resolvedLabels) {
+      targets.add(getExistingTarget(label));
     }
-    for (Label label : resolvedLabels.getFilteredTargets()) {
-      resolvedTargetsBuilder.remove(getExistingTarget(label));
-    }
-    return resolvedTargetsBuilder;
+    return targets;
   }
 
-  private void precomputePackages(WalkableGraph walkableGraph) {
+  private void precomputePackages(WalkableGraph walkableGraph) throws InterruptedException {
     Set<PackageIdentifier> packagesToRequest = getPackagesIdentifiers();      
     packages = Maps.newHashMapWithExpectedSize(packagesToRequest.size());
     for (PackageIdentifier pkgIdentifier : packagesToRequest) {
@@ -98,44 +79,22 @@ abstract class TargetPatternsResultBuilder {
 
   private Set<PackageIdentifier> getPackagesIdentifiers() {
     Set<PackageIdentifier> packagesIdentifiers = new HashSet<>();
-    for (Label label : getLabels()) {
+    for (Label label : resolvedLabelsBuilder) {
       packagesIdentifiers.add(label.getPackageIdentifier());
     }
     return packagesIdentifiers;
   }
 
-  private Package findPackageInGraph(PackageIdentifier pkgIdentifier,
-      WalkableGraph walkableGraph) {
-    SkyKey key = PackageValue.key(pkgIdentifier);
-    Package pkg = null;
-    NoSuchPackageException nspe = (NoSuchPackageException) walkableGraph.getException(key);
-    if (nspe != null) {
-      pkg = nspe.getPackage();
-    } else {
-      pkg = ((PackageValue) walkableGraph.getValue(key)).getPackage();
-    }
-    Preconditions.checkNotNull(pkg, pkgIdentifier);
-    return pkg;
+  private static Package findPackageInGraph(
+      PackageIdentifier pkgIdentifier, WalkableGraph walkableGraph) throws InterruptedException {
+    return Preconditions.checkNotNull(
+            ((PackageValue) walkableGraph.getValue(PackageValue.key(pkgIdentifier))), pkgIdentifier)
+        .getPackage();
   }
 
-  /**
-   * Adds the result from expansion of positive target pattern (eg, "//foo:all").
-   */
-  abstract void addLabelsOfNegativePattern(ResolvedTargets<Label> labels);
-
-  /**
-   * Adds the result from expansion of negative target pattern (eg, "-//foo:all").
-   */
-  abstract void addLabelsOfPositivePattern(ResolvedTargets<Label> labels);
-
-  /**
-   * Returns {@code ResolvedTargets.Builder<Target>} with final set of targets. Note that this
-   * method doesn't set error flag in result.
-   */
-  abstract ResolvedTargets.Builder<Target> buildInternal() throws TargetParsingException;
-
-  /**
-   * Returns target labels from all individual results.
-   */
-  protected abstract Iterable<Label> getLabels();
+  /** Adds the result from expansion of negative target pattern (eg, "-//foo:all"). */
+  void addLabelsOfPositivePattern(ResolvedTargets<Label> labels) {
+    Preconditions.checkArgument(labels.getFilteredTargets().isEmpty());
+    resolvedLabelsBuilder.addAll(labels.getTargets());
+  }
 }

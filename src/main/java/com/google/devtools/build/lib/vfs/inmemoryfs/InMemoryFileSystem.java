@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2019 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,56 +11,53 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
 package com.google.devtools.build.lib.vfs.inmemoryfs;
 
+import static com.google.common.base.MoreObjects.firstNonNull;
+import static com.google.devtools.build.lib.collect.CollectionUtils.isNullOrEmpty;
+
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Iterators;
+import com.google.devtools.build.lib.clock.Clock;
+import com.google.devtools.build.lib.clock.JavaClock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.unix.FileAccessException;
-import com.google.devtools.build.lib.util.Clock;
-import com.google.devtools.build.lib.util.JavaClock;
+import com.google.devtools.build.lib.util.OS;
+import com.google.devtools.build.lib.vfs.AbstractFileSystemWithCustomStat;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
+import com.google.devtools.build.lib.vfs.FileAccessException;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.vfs.ScopeEscapableFileSystem;
-import com.google.devtools.build.lib.vfs.Symlinks;
-
-import java.io.ByteArrayInputStream;
+import com.google.errorprone.annotations.CheckReturnValue;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.channels.ReadableByteChannel;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
-import java.util.Set;
-import java.util.Stack;
-
 import javax.annotation.Nullable;
 
 /**
  * This class provides a complete in-memory file system.
  *
- * <p>Naming convention: we use "path" for all {@link Path} variables, since these
- * represent *names* and we use "node" or "inode" for InMemoryContentInfo
- * variables, since these correspond to inodes in the UNIX file system.
+ * <p>Naming convention: we use "path" for all {@link Path} variables, since these represent *names*
+ * and we use "node" or "inode" for InMemoryContentInfo variables, since these correspond to inodes
+ * in the UNIX file system.
  *
- * <p>The code is structured to be as similar to the implementation of UNIX "namei"
- * as is reasonably possibly. This provides a firm reference point for many
- * concepts and makes compatibility easier to achieve.
- *
- * <p>As a scope-escapable file system, this class supports re-delegation of symbolic links
- * that escape its root. This is done through the use of {@link OutOfScopeFileStatus}
- * and {@link OutOfScopeDirectoryStatus} objects, which may be returned by
- * getDirectory, pathWalk, and scopeLimitedStat. Any code that calls one of these
- * methods (either directly or indirectly) is obligated to check the possibility
- * that its info represents an out-of-scope path. Lack of such a check will result
- * in unchecked runtime exceptions upon any request for status data (as well as
- * possible logical errors).
+ * <p>The code is structured to be as similar to the implementation of UNIX "namei" as is reasonably
+ * possibly. This provides a firm reference point for many concepts and makes compatibility easier
+ * to achieve.
  */
 @ThreadSafe
-public class InMemoryFileSystem extends ScopeEscapableFileSystem {
+public class InMemoryFileSystem extends AbstractFileSystemWithCustomStat {
 
-  private final Clock clock;
+  protected final Clock clock;
 
   // The root inode (a directory).
   private final InMemoryDirectoryInfo rootInode;
@@ -69,38 +66,30 @@ public class InMemoryFileSystem extends ScopeEscapableFileSystem {
   private static final int MAX_TRAVERSALS = 256;
 
   /**
-   * Creates a new InMemoryFileSystem with scope checking disabled (all paths are considered to be
-   * within scope) and a default clock.
+   * Creates a new {@code InMemoryFileSystem} with default clock and given hash function.
+   *
+   * @param hashFunction the function to use for calculating digests.
    */
-  public InMemoryFileSystem() {
-    this(new JavaClock());
+  public InMemoryFileSystem(DigestHashFunction hashFunction) {
+    this(new JavaClock(), hashFunction);
   }
 
-  /**
-   * Creates a new InMemoryFileSystem with scope checking disabled (all
-   * paths are considered to be within scope).
-   */
-  public InMemoryFileSystem(Clock clock) {
-    this(clock, null);
-  }
-
-  /**
-   * Creates a new InMemoryFileSystem with scope checking bound to
-   * scopeRoot, i.e. any path that's not below scopeRoot is considered
-   * to be out of scope.
-   */
-  protected InMemoryFileSystem(Clock clock, PathFragment scopeRoot) {
-    super(scopeRoot);
+  /** Creates a new {@code InMemoryFileSystem} with the given clock and hash function. */
+  public InMemoryFileSystem(Clock clock, DigestHashFunction hashFunction) {
+    super(hashFunction);
     this.clock = clock;
-    this.rootInode = new InMemoryDirectoryInfo(clock);
+    this.rootInode = newRootInode(clock);
+  }
+
+  private static InMemoryDirectoryInfo newRootInode(Clock clock) {
+    InMemoryDirectoryInfo rootInode = new InMemoryDirectoryInfo(clock);
     rootInode.addChild(".", rootInode);
     rootInode.addChild("..", rootInode);
+    return rootInode;
   }
 
-  /**
-   * The errors that {@link InMemoryFileSystem} might issue for different sorts of IO failures.
-   */
-  public enum Error {
+  /** The errors that {@link InMemoryFileSystem} might issue for different sorts of IO failures. */
+  protected enum Errno implements InodeOrErrno {
     ENOENT("No such file or directory"),
     EACCES("Permission denied"),
     ENOTDIR("Not a directory"),
@@ -112,8 +101,29 @@ public class InMemoryFileSystem extends ScopeEscapableFileSystem {
 
     private final String message;
 
-    private Error(String message) {
+    Errno(String message) {
       this.message = message;
+    }
+
+    @Nullable
+    @Override
+    public InMemoryContentInfo inode() {
+      return null;
+    }
+
+    @Override
+    public Errno error() {
+      return this;
+    }
+
+    @Override
+    public boolean isError() {
+      return true;
+    }
+
+    @Override
+    public InMemoryContentInfo inodeOrThrow(PathFragment path) throws IOException {
+      throw exception(path);
     }
 
     @Override
@@ -121,98 +131,20 @@ public class InMemoryFileSystem extends ScopeEscapableFileSystem {
       return message;
     }
 
-    /** Implemented by exceptions that contain the extra info of which Error caused them. */
-    private static interface WithError {
-      Error getError();
-    }
-
     /**
-     * The exceptions below extend their parent classes in order to additionally store the error
-     * that caused them. However, they must impersonate their parents to any outside callers,
-     * including in their toString() method, which prints the class name followed by the exception
-     * method. This method returns the same value as the toString() method of a {@link Throwable}'s
-     * parent would, so that the child class can have the same toString() value.
+     * Throws a new {@link IOException} for this error. The exception message contains {@code path},
+     * and is consistent with the messages returned by {@link
+     * com.google.devtools.build.lib.vfs.FileSystemUtils}.
      */
-    private static String parentThrowableToString(Throwable obj) {
-      String s = obj.getClass().getSuperclass().getName();
-      String message = obj.getLocalizedMessage();
-      return (message != null) ? (s + ": " + message) : s;
-    }
-
-    private static class IOExceptionWithError extends IOException implements WithError {
-      private final Error errorCode;
-
-      private IOExceptionWithError(String message, Error errorCode) {
-        super(message);
-        this.errorCode = errorCode;
-      }
-
-      @Override
-      public Error getError() {
-        return errorCode;
-      }
-
-      @Override
-      public String toString() {
-        return parentThrowableToString(this);
-      }
-    }
-
-
-    private static class FileNotFoundExceptionWithError
-        extends FileNotFoundException implements WithError {
-      private final Error errorCode;
-
-      private FileNotFoundExceptionWithError(String message, Error errorCode) {
-        super(message);
-        this.errorCode = errorCode;
-      }
-
-      @Override
-      public Error getError() {
-        return errorCode;
-      }
-
-      @Override
-      public String toString() {
-        return parentThrowableToString(this);
-      }
-    }
-
-
-    private static class FileAccessExceptionWithError
-        extends FileAccessException implements WithError {
-      private final Error errorCode;
-
-      private FileAccessExceptionWithError(String message, Error errorCode) {
-        super(message);
-        this.errorCode = errorCode;
-      }
-
-      @Override
-      public Error getError() {
-        return errorCode;
-      }
-
-      @Override
-      public String toString() {
-        return parentThrowableToString(this);
-      }
-    }
-
-    /**
-     * Returns a new IOException for the error. The exception message
-     * contains 'path', and is consistent with the messages returned by
-     * c.g.common.unix.FilesystemUtils.
-     */
-    public IOException exception(Path path) throws IOException {
+    public IOException exception(PathFragment path) throws IOException {
       String m = path + " (" + message + ")";
-      if (this == EACCES) {
-        throw new FileAccessExceptionWithError(m, this);
-      } else if (this == ENOENT) {
-        throw new FileNotFoundExceptionWithError(m, this);
-      } else {
-        throw new IOExceptionWithError(m, this);
+      switch (this) {
+        case EACCES:
+          throw new FileAccessException(m);
+        case ENOENT:
+          throw new FileNotFoundException(m);
+        default:
+          throw new IOException(m);
       }
     }
   }
@@ -223,698 +155,625 @@ public class InMemoryFileSystem extends ScopeEscapableFileSystem {
    * <p>If <code>/proc/mounts</code> does not exist return {@code "inmemoryfs"}.
    */
   @Override
-  public String getFileSystemType(Path path) {
-    return path.getRelative("/proc/mounts").exists() ? super.getFileSystemType(path) : "inmemoryfs";
+  public String getFileSystemType(PathFragment path) {
+    return exists(path.getRelative("/proc/mounts")) ? super.getFileSystemType(path) : "inmemoryfs";
   }
 
-  /****************************************************************************
-   * "Kernel" primitives: basic directory lookup primitives, in topological
-   * order.
+  /*
+   ***************************************************************************
+   * "Kernel" primitives: basic directory lookup primitives, in topological order.
    */
 
   /**
-   * Unlinks the entry 'child' from its existing parent directory 'dir'. Dual to
-   * insert. This succeeds even if 'child' names a non-empty directory; we need
-   * that for renameTo. 'child' must be a member of its parent directory,
-   * however. Fails if the directory was read-only.
+   * Unlinks the entry 'child' from its existing parent directory 'dir'. Dual to insert. This
+   * succeeds even if 'child' names a non-empty directory; we need that for renameTo. 'child' must
+   * be a member of its parent directory, however. Fails if the directory was read-only.
    */
-  private void unlink(InMemoryDirectoryInfo dir, String child, Path errorPath)
+  private static void unlink(InMemoryDirectoryInfo dir, String child, PathFragment errorPath)
       throws IOException {
-    if (!dir.isWritable()) { throw Error.EACCES.exception(errorPath); }
+    if (!dir.isWritable()) {
+      throw Errno.EACCES.exception(errorPath);
+    }
     dir.removeChild(child);
   }
 
   /**
-   * Inserts inode 'childInode' into the existing directory 'dir' under the
-   * specified 'name'.  Dual to unlink.  Fails if the directory was read-only.
+   * Inserts inode 'childInode' into the existing directory 'dir' under the specified 'name'. Dual
+   * to unlink. Fails if the directory was read-only.
    */
-  private void insert(InMemoryDirectoryInfo dir, String child,
-                      InMemoryContentInfo childInode, Path errorPath)
-      throws IOException {
-    if (!dir.isWritable()) { throw Error.EACCES.exception(errorPath); }
-    dir.addChild(child, childInode);
-  }
-
-  /**
-   * Given an existing directory 'dir', looks up 'name' within it and returns
-   * its inode. Assumes the file exists, unless 'create', in which case it will
-   * try to create it. May fail with ENOTDIR, EACCES, ENOENT. Error messages
-   * will be reported against file 'path'.
-   */
-  private InMemoryContentInfo directoryLookup(InMemoryContentInfo dir,
-                                              String name,
-                                              boolean create,
-                                              Path path) throws IOException {
-    if (!dir.isDirectory()) { throw Error.ENOTDIR.exception(path); }
-    InMemoryDirectoryInfo imdi = (InMemoryDirectoryInfo) dir;
-    if (!imdi.isExecutable()) { throw Error.EACCES.exception(path); }
-    InMemoryContentInfo child = imdi.getChild(name);
-    if (child == null) {
-      if (!create)  {
-        throw Error.ENOENT.exception(path);
-      } else {
-        child = makeFileInfo(clock, path.asFragment());
-        insert(imdi, name, child, path);
-      }
+  @CheckReturnValue
+  private static Errno insert(
+      InMemoryDirectoryInfo dir, String child, InMemoryContentInfo childInode) {
+    if (!dir.isWritable()) {
+      return Errno.EACCES;
     }
-    return child;
+    dir.addChild(child, childInode);
+    return null;
+  }
+
+  private static void insert(
+      InMemoryDirectoryInfo dir,
+      String child,
+      InMemoryContentInfo childInode,
+      PathFragment errorPath)
+      throws IOException {
+    Errno error = insert(dir, child, childInode);
+    if (error != null) {
+      throw error.exception(errorPath);
+    }
   }
 
   /**
-   * Low-level path-to-inode lookup routine. Analogous to path_walk() in many
-   * UNIX kernels. Given 'path', walks the directory tree from the root,
-   * resolving all symbolic links, and returns the designated inode.
+   * Given an existing directory 'dir', looks up 'name' within it and returns its inode. May fail
+   * with ENOTDIR, EACCES, ENOENT. Error messages will be reported against file 'path'.
+   */
+  private static InodeOrErrno directoryLookupErrno(InMemoryContentInfo dir, String name) {
+    if (!dir.isDirectory()) {
+      return Errno.ENOTDIR;
+    }
+    if (!dir.isExecutable()) {
+      return Errno.EACCES;
+    }
+    return firstNonNull(dir.asDirectory().getChild(name), Errno.ENOENT);
+  }
+
+  protected FileInfo newFile(Clock clock, PathFragment path) {
+    return new InMemoryFileInfo(clock);
+  }
+
+  /** How to handle {@link Errno#ENOENT} during {@link #pathWalkErrno}. */
+  private enum OnEnoent {
+    /** Halt the walk with {@link Errno#ENOENT}. */
+    HALT,
+    /**
+     * Create a file node if at the last segment of the walk, otherwise halt with {@link
+     * Errno#ENOENT}.
+     */
+    CREATE_FILE,
+    /** Create a directory node. */
+    CREATE_DIRECTORY_AND_PARENTS
+  }
+
+  /**
+   * Low-level path-to-inode lookup routine. Analogous to path_walk() in many UNIX kernels. Given
+   * 'path', walks the directory tree from the root, resolving all symbolic links, and returns the
+   * designated inode.
    *
-   * <p>If 'create' is false, the inode must exist; otherwise, it will be created
-   * and added to its parent directory, which must exist.
-   *
-   * <p>Iff the given path escapes this file system's scope, the returned value
-   * is an {@link OutOfScopeFileStatus} instance. Any code that calls this method
-   * needs to check for that possibility (via {@link ScopeEscapableStatus#outOfScope}).
+   * <p>ENOENT along the walk is handled according to the given {@link OnEnoent}.
    *
    * <p>May fail with ENOTDIR, ENOENT, EACCES, ELOOP.
    */
-  private synchronized InMemoryContentInfo pathWalk(Path path, boolean create)
-      throws IOException {
-    // Implementation note: This is where we check for out-of-scope symlinks and
-    // trigger re-delegation to another file system accordingly. This code handles
-    // both absolute and relative symlinks. Some assumptions we make: First, only
-    // symlink targets as read from getNormalizedLinkContent() can escape our scope.
-    // This is because Path objects are all canonicalized (see {@link Path#getRelative},
-    // etc.) and symlink target segments that get added to the stack are in-scope by
-    // definition. Second, symlink targets with relative segments must have the form
-    // [".."]*[standard segment]+, i.e. only the ".." non-standard segment is allowed
-    // and it may only appear as part of a contiguous prefix sequence.
+  private synchronized InodeOrErrno pathWalkErrno(PathFragment path, OnEnoent behavior) {
+    Iterator<String> it = path.segments().iterator();
 
-    Stack<String> stack = new Stack<>();
-    PathFragment rootPathFragment = rootPath.asFragment();
-    for (Path p = path; !p.asFragment().equals(rootPathFragment); p = p.getParentDirectory()) {
-      stack.push(p.getBaseName());
+    // Prepend the Windows drive if there is one.
+    if (path.getDriveStrLength() > 1) {
+      it = Iterators.concat(Iterators.singletonIterator(path.getDriveStr()), it);
     }
 
     InMemoryContentInfo inode = rootInode;
-    int parentDepth = -1;
     int traversals = 0;
 
-    while (!stack.isEmpty()) {
+    // Stack of symlink targets. Lazily initialized because we probably won't see any.
+    Deque<String> symlinks = null;
+
+    while (it.hasNext() || !isNullOrEmpty(symlinks)) {
       traversals++;
 
-      String name = stack.pop();
-      parentDepth += name.equals("..") ? -1 : 1;
+      String name = !isNullOrEmpty(symlinks) ? symlinks.pop() : it.next();
 
-      // ENOENT on last segment with 'create' => create a new file.
-      InMemoryContentInfo child = directoryLookup(inode, name, create && stack.isEmpty(), path);
-      if (child.isSymbolicLink()) {
-        PathFragment linkTarget = ((InMemoryLinkInfo) child).getNormalizedLinkContent();
-        if (!inScope(parentDepth, linkTarget)) {
-          return outOfScopeStatus(linkTarget, parentDepth, stack);
+      InodeOrErrno childOrError = directoryLookupErrno(inode, name);
+
+      InMemoryContentInfo child;
+      if (!childOrError.isError()) {
+        child = childOrError.inode();
+      } else if (childOrError.error() == Errno.ENOENT && behavior != OnEnoent.HALT) {
+        InMemoryDirectoryInfo parent = inode.asDirectory();
+        Errno error;
+        if (behavior == OnEnoent.CREATE_DIRECTORY_AND_PARENTS) {
+          // ENOENT anywhere with Create.DIRECTORY_AND_PARENTS => create a new directory.
+          InMemoryDirectoryInfo newDir = new InMemoryDirectoryInfo(clock);
+          error = insertChildDirectory(parent, newDir, name);
+          child = newDir;
+        } else if (!it.hasNext() && isNullOrEmpty(symlinks)) {
+          // ENOENT on last segment with Create.FILE => create a new file.
+          child = newFile(clock, path);
+          error = insert(parent, name, child);
+        } else {
+          return childOrError;
         }
-        if (linkTarget.isAbsolute()) {
-          inode = rootInode;
-          parentDepth = -1;
-        }
-        if (traversals > MAX_TRAVERSALS) {
-          throw Error.ELOOP.exception(path);
-        }
-        for (int ii = linkTarget.segmentCount() - 1; ii >= 0; --ii) {
-          stack.push(linkTarget.getSegment(ii)); // Note this may include ".." segments.
+        if (error != null) {
+          return error;
         }
       } else {
+        return childOrError;
+      }
+
+      if (!child.isSymbolicLink()) {
         inode = child;
+      } else {
+        PathFragment linkTarget = ((InMemoryLinkInfo) child).getNormalizedLinkContent();
+        if (linkTarget.isAbsolute()) {
+          inode = rootInode;
+        }
+        if (traversals > MAX_TRAVERSALS) {
+          return Errno.ELOOP;
+        }
+
+        List<String> segments = linkTarget.splitToListOfSegments(); // May include ".." segments.
+        if (symlinks == null) {
+          symlinks = new ArrayDeque<>(segments);
+        } else {
+          for (int ii = segments.size() - 1; ii >= 0; --ii) {
+            symlinks.push(segments.get(ii));
+          }
+        }
+        // Push Windows drive if there is one.
+        if (linkTarget.getDriveStrLength() > 1) {
+          symlinks.push(linkTarget.getDriveStr());
+        }
       }
     }
     return inode;
   }
 
   /**
-   * Helper routine for pathWalk: given a symlink target known to escape this file system's
-   * scope (and that has the form [".."]*[standard segment]+), the number of segments
-   * in the directory containing the symlink, and the remaining path segments following
-   * the symlink in the original input to pathWalk, returns an OutofScopeFileStatus
-   * initialized with an appropriate out-of-scope reformulation of pathWalk's original
-   * input.
-   */
-  private OutOfScopeFileStatus outOfScopeStatus(PathFragment linkTarget, int parentDepth,
-      Stack<String> descendantSegments) {
-
-    PathFragment escapingPath;
-    if (linkTarget.isAbsolute()) {
-      escapingPath = linkTarget;
-    } else {
-      // Relative out-of-scope paths must look like "../../../a/b/c". Find the target's
-      // parent path depth by subtracting one from parentDepth for each ".." reference.
-      // Then use that to retrieve a prefix of the scope root, which is the target's
-      // canonicalized parent path.
-      int leadingParentRefs = leadingParentReferences(linkTarget);
-      int baseDepth = parentDepth - leadingParentRefs;
-      Preconditions.checkState(baseDepth < scopeRoot.segmentCount());
-      escapingPath = baseDepth > 0
-          ? scopeRoot.subFragment(0, baseDepth)
-          : scopeRoot.subFragment(0, 0);
-      // Now add in everything that comes after the ".." sequence.
-      for (int i = leadingParentRefs; i < linkTarget.segmentCount(); i++) {
-        escapingPath = escapingPath.getRelative(linkTarget.getSegment(i));
-      }
-    }
-
-    // We've now converted the symlink to its target in canonicalized absolute path
-    // form. Since the symlink wasn't necessarily the final segment in the original
-    // input sent to pathWalk, now add in every segment that came after.
-    while (!descendantSegments.empty()) {
-      escapingPath = escapingPath.getRelative(descendantSegments.pop());
-    }
-
-    return new OutOfScopeFileStatus(escapingPath);
-  }
-
-  /**
-   * Given 'path', returns the existing directory inode it designates,
-   * following symbolic links.
+   * Given 'path', returns the existing directory inode it designates, following symbolic links.
    *
    * <p>May fail with ENOTDIR, or any exception from pathWalk.
-   *
-   * <p>Iff the given path escapes this file system's scope, this method skips
-   * ENOTDIR checking and returns an OutOfScopeDirectoryStatus instance. Any
-   * code that calls this method needs to check for that possibility
-   * (via {@link ScopeEscapableStatus#outOfScope}).
    */
-  private InMemoryDirectoryInfo getDirectory(Path path) throws IOException {
-    InMemoryContentInfo dirInfo = pathWalk(path, false);
-    if (dirInfo.outOfScope()) {
-      return new OutOfScopeDirectoryStatus(dirInfo.getEscapingPath());
-    } else if (!dirInfo.isDirectory()) {
-      throw Error.ENOTDIR.exception(path);
-    } else {
-      return (InMemoryDirectoryInfo) dirInfo;
+  private InodeOrErrno getDirectoryErrno(PathFragment path) {
+    InodeOrErrno dirInfoOrError = pathWalkErrno(path, OnEnoent.HALT);
+    if (dirInfoOrError.isError()) {
+      return dirInfoOrError;
     }
+    return dirInfoOrError.inode().isDirectory() ? dirInfoOrError : Errno.ENOTDIR;
   }
 
   /**
-   * Helper method for stat, scopeLimitedStat: lock the internal state and return the
-   * path's (no symlink-followed) stat if the path's parent directory is within scope,
-   * else return an "out of scope" reference to the path's parent directory (which will
-   * presumably be re-delegated to another FS).
+   * Given 'path', returns the existing directory inode it designates, following symbolic links.
+   *
+   * <p>May fail with ENOTDIR, or any exception from pathWalk.
    */
-  private synchronized InMemoryContentInfo getNoFollowStatOrOutOfScopeParent(Path path)
-      throws IOException  {
-    InMemoryDirectoryInfo dirInfo = getDirectory(path.getParentDirectory());
-    return dirInfo.outOfScope()
-        ? dirInfo
-        : directoryLookup(dirInfo, path.getBaseName(), /*create=*/false, path);
+  private InMemoryDirectoryInfo getDirectory(PathFragment path) throws IOException {
+    return getDirectoryErrno(path).inodeOrThrow(path).asDirectory();
+  }
+
+  /** Helper method for stat and inodeStat: return the path's (no symlink-followed) stat. */
+  private synchronized InodeOrErrno noFollowStatErrno(PathFragment path) {
+    InodeOrErrno dirInfoOrError = getDirectoryErrno(path.getParentDirectory());
+    if (dirInfoOrError.isError()) {
+      return dirInfoOrError;
+    }
+    return directoryLookupErrno(dirInfoOrError.inode(), baseNameOrWindowsDrive(path));
   }
 
   /**
-   * Given 'path', returns the existing inode it designates, optionally
-   * following symbolic links.  Analogous to UNIX stat(2)/lstat(2), except that
-   * it returns a mutable inode we can modify directly.
+   * Given 'path', returns the existing inode it designates, optionally following symbolic links.
+   * Analogous to UNIX stat(2)/lstat(2), except that it returns a mutable inode we can modify
+   * directly.
    */
   @Override
-  public FileStatus stat(Path path, boolean followSymlinks) throws IOException {
-    if (followSymlinks) {
-      InMemoryContentInfo status = scopeLimitedStat(path, true);
-      return status.outOfScope()
-          ? statWithDelegator(status.getEscapingPath(), true)
-          : status;
-    } else {
-      if (path.equals(rootPath)) {
-        return rootInode;
-      } else {
-        InMemoryContentInfo status = getNoFollowStatOrOutOfScopeParent(path);
-        // If out of scope, status references the path's parent directory. Else it references the
-        // path itself.
-        return status.outOfScope()
-            ? getDelegatedPath(status.getEscapingPath().getRelative(
-                  path.getBaseName())).stat(Symlinks.NOFOLLOW)
-            : status;
-      }
-    }
+  public FileStatus stat(PathFragment path, boolean followSymlinks) throws IOException {
+    return inodeStatErrno(path, followSymlinks).inodeOrThrow(path);
   }
 
   @Override
   @Nullable
-  public FileStatus statIfFound(Path path, boolean followSymlinks) throws IOException {
-    try {
-      return stat(path, followSymlinks);
-    } catch (IOException e) {
-      if (e instanceof Error.WithError) {
-        Error errorCode = ((Error.WithError) e).getError();
-        if  (errorCode == Error.ENOENT || errorCode == Error.ENOTDIR) {
-          return null;
-        }
-      }
-      throw e;
+  public FileStatus statIfFound(PathFragment path, boolean followSymlinks) throws IOException {
+    InodeOrErrno inodeOrErrno = inodeStatErrno(path, followSymlinks);
+    if (!inodeOrErrno.isError()) {
+      return inodeOrErrno.inode();
     }
+    Errno errorCode = inodeOrErrno.error();
+    if (errorCode == Errno.ENOENT || errorCode == Errno.ENOTDIR) {
+      return null;
+    }
+    throw errorCode.exception(path);
   }
 
-  /**
-   * Version of stat that returns an inode if the input path stays entirely within
-   * this file system's scope, otherwise an {@link OutOfScopeFileStatus}.
-   *
-   * <p>Any code that calls this method needs to check for either possibility via
-   * {@link ScopeEscapableStatus#outOfScope}.
-   */
-  protected InMemoryContentInfo scopeLimitedStat(Path path, boolean followSymlinks)
-      throws IOException {
+  @Override
+  @Nullable
+  protected FileStatus statNullable(PathFragment path, boolean followSymlinks) {
+    return inodeStatErrno(path, followSymlinks).inode();
+  }
+
+  /** Version of stat that returns an InodeOrErrno of the input path. */
+  @CheckReturnValue
+  protected InodeOrErrno inodeStatErrno(PathFragment path, boolean followSymlinks) {
     if (followSymlinks) {
-      return pathWalk(path, false);
-    } else {
-      if (path.equals(rootPath)) {
-        return rootInode;
-      } else {
-        InMemoryContentInfo status = getNoFollowStatOrOutOfScopeParent(path);
-        // If out of scope, status references the path's parent directory. Else it references the
-        // path itself.
-        return status.outOfScope()
-            ? new OutOfScopeFileStatus(status.getEscapingPath().getRelative(path.getBaseName()))
-            : status;
-      }
+      return pathWalkErrno(path, OnEnoent.HALT);
     }
+    return isRootDirectory(path) ? rootInode : noFollowStatErrno(path);
   }
 
-  /****************************************************************************
-   *  FileSystem methods
+  private InMemoryContentInfo inodeStat(PathFragment path, boolean followSymlinks)
+      throws IOException {
+    return inodeStatErrno(path, followSymlinks).inodeOrThrow(path);
+  }
+
+  /*
+   ***************************************************************************
+   * FileSystem methods
    */
 
   /**
-   * This is a helper routing for {@link #resolveSymbolicLinks(Path)}, i.e.
-   * the "user-mode" routing for canonicalising paths. It is analogous to the
-   * code in glibc's realpath(3).
+   * This is a helper routing for {@link #resolveSymbolicLinks(PathFragment)}, i.e. the "user-mode"
+   * routing for canonicalizing paths. It is analogous to the code in glibc's realpath(3).
    *
-   * <p>Just like realpath, resolveSymbolicLinks requires a quadratic number of
-   * directory lookups: n path segments are statted, and each stat requires a
-   * linear amount of work in the "kernel" routine.
+   * <p>Just like realpath, resolveSymbolicLinks requires a quadratic number of directory lookups: n
+   * path segments are statted, and each stat requires a linear amount of work in the "kernel"
+   * routine.
    */
   @Override
-  protected PathFragment resolveOneLink(Path path) throws IOException {
+  protected PathFragment resolveOneLink(PathFragment path) throws IOException {
     // Beware, this seemingly simple code belies the complex specification of
     // FileSystem.resolveOneLink().
-    InMemoryContentInfo status = scopeLimitedStat(path, false);
-    if (status.outOfScope()) {
-      return resolveOneLinkWithDelegator(status.getEscapingPath());
-    } else {
-      return status.isSymbolicLink()
-          ? ((InMemoryLinkInfo) status).getLinkContent()
-          : null;
-    }
+    InMemoryContentInfo status = inodeStat(path, false);
+    return status.isSymbolicLink() ? ((InMemoryLinkInfo) status).getLinkContent() : null;
   }
 
   @Override
-  protected boolean isDirectory(Path path, boolean followSymlinks) {
-    try {
-      return stat(path, followSymlinks).isDirectory();
-    } catch (IOException e) {
-      return false;
-    }
+  protected boolean exists(PathFragment path, boolean followSymlinks) {
+    return statNullable(path, followSymlinks) != null;
   }
 
   @Override
-  protected boolean isFile(Path path, boolean followSymlinks) {
-    try {
-      return stat(path, followSymlinks).isFile();
-    } catch (IOException e) {
-      return false;
-    }
+  protected boolean isReadable(PathFragment path) throws IOException {
+    InMemoryContentInfo status = inodeStat(path, true);
+    return status.isReadable();
   }
 
   @Override
-  protected boolean isSymbolicLink(Path path) {
-    try {
-      return stat(path, false).isSymbolicLink();
-    } catch (IOException e) {
-      return false;
-    }
+  protected synchronized void setReadable(PathFragment path, boolean readable) throws IOException {
+    InMemoryContentInfo status = inodeStat(path, true);
+    status.setReadable(readable);
   }
 
   @Override
-  protected boolean exists(Path path, boolean followSymlinks) {
-    try {
-      stat(path, followSymlinks);
-      return true;
-    } catch (IOException e) {
-      return false;
-    }
-  }
-
-  /**
-   * Like {@link #exists}, but checks for existence within this filesystem's scope.
-   */
-  protected boolean scopeLimitedExists(Path path, boolean followSymlinks) {
-    try {
-      // Path#asFragment() always returns an absolute path, so inScope() is called with
-      // parentDepth = 0.
-      return inScope(0, path.asFragment()) && !scopeLimitedStat(path, followSymlinks).outOfScope();
-    } catch (IOException e) {
-      return false;
-    }
+  protected boolean isWritable(PathFragment path) throws IOException {
+    InMemoryContentInfo status = inodeStat(path, true);
+    return status.isWritable();
   }
 
   @Override
-  protected boolean isReadable(Path path) throws IOException {
-    InMemoryContentInfo status = scopeLimitedStat(path, true);
-    return status.outOfScope()
-        ? getDelegatedPath(status.getEscapingPath()).isReadable()
-        : status.isReadable();
+  public synchronized void setWritable(PathFragment path, boolean writable) throws IOException {
+    InMemoryContentInfo status = inodeStat(path, true);
+    status.setWritable(writable);
   }
 
   @Override
-  protected void setReadable(Path path, boolean readable) throws IOException {
-    InMemoryContentInfo status;
-    synchronized (this) {
-      status = scopeLimitedStat(path, true);
-      if (!status.outOfScope()) {
-        status.setReadable(readable);
-        return;
-      }
-    }
-    // If we get here, we're out of scope.
-    getDelegatedPath(status.getEscapingPath()).setReadable(readable);
+  protected boolean isExecutable(PathFragment path) throws IOException {
+    InMemoryContentInfo status = inodeStat(path, true);
+    return status.isExecutable();
   }
 
   @Override
-  protected boolean isWritable(Path path) throws IOException {
-    InMemoryContentInfo status = scopeLimitedStat(path, true);
-    return status.outOfScope()
-        ? getDelegatedPath(status.getEscapingPath()).isWritable()
-        : status.isWritable();
-  }
-
-  @Override
-  protected void setWritable(Path path, boolean writable) throws IOException {
-    InMemoryContentInfo status;
-    synchronized (this) {
-      status = scopeLimitedStat(path, true);
-      if (!status.outOfScope()) {
-        status.setWritable(writable);
-        return;
-      }
-    }
-    // If we get here, we're out of scope.
-    getDelegatedPath(status.getEscapingPath()).setWritable(writable);
-  }
-
-  @Override
-  protected boolean isExecutable(Path path) throws IOException {
-    InMemoryContentInfo status = scopeLimitedStat(path, true);
-    return status.outOfScope()
-        ? getDelegatedPath(status.getEscapingPath()).isExecutable()
-        : status.isExecutable();
-  }
-
-  @Override
-  protected void setExecutable(Path path, boolean executable)
+  protected synchronized void setExecutable(PathFragment path, boolean executable)
       throws IOException {
-    InMemoryContentInfo status;
-    synchronized (this) {
-      status = scopeLimitedStat(path, true);
-      if (!status.outOfScope()) {
-        status.setExecutable(executable);
-        return;
-      }
+    InMemoryContentInfo status = inodeStat(path, true);
+    status.setExecutable(executable);
+  }
+
+  @Override
+  public boolean supportsModifications(PathFragment path) {
+    return true;
+  }
+
+  @Override
+  public boolean supportsSymbolicLinksNatively(PathFragment path) {
+    return true;
+  }
+
+  @Override
+  public boolean supportsHardLinksNatively(PathFragment path) {
+    return true;
+  }
+
+  @Override
+  public boolean isFilePathCaseSensitive() {
+    return OS.getCurrent() != OS.WINDOWS;
+  }
+
+  @Override
+  public boolean createDirectory(PathFragment path) throws IOException {
+    if (isRootDirectory(path)) {
+      throw Errno.EACCES.exception(path);
     }
-    // If we get here, we're out of scope.
-    getDelegatedPath(status.getEscapingPath()).setExecutable(executable);
-  }
 
-  @Override
-  public boolean supportsModifications() {
-    return true;
-  }
-
-  @Override
-  public boolean supportsSymbolicLinks() {
-    return true;
-  }
-
-  /**
-   * Constructs a new inode.  Provided so that subclasses of InMemoryFileSystem
-   * can inject subclasses of FileInfo properly.
-   */
-  protected FileInfo makeFileInfo(Clock clock, PathFragment frag) {
-    return new InMemoryFileInfo(clock);
-  }
-
-  /**
-   * Returns a new path constructed by appending the child's base name to the
-   * escaped parent path. For example, assume our file system root is /foo
-   * and /foo/link1 -> /bar. This method can be used on child = /foo/link1/link2/name
-   * and parent = /bar/link2 to return /bar/link2/name, which is a semi-resolved
-   * path bound to a different file system.
-   */
-  private Path getDelegatedPath(PathFragment escapedParent, Path child) {
-    return getDelegatedPath(escapedParent.getRelative(child.getBaseName()));
-  }
-
-  @Override
-  protected boolean createDirectory(Path path) throws IOException {
-    if (path.equals(rootPath)) { throw Error.EACCES.exception(path); }
-
-    InMemoryDirectoryInfo parent;
+    PathFragment parentDir = path.getParentDirectory();
+    String name = baseNameOrWindowsDrive(path);
+    Errno error;
     synchronized (this) {
-      parent = getDirectory(path.getParentDirectory());
-      if (!parent.outOfScope()) {
-        InMemoryContentInfo child = parent.getChild(path.getBaseName());
-        if (child != null) { // already exists
-          if (child.isDirectory()) {
-            return false;
-          } else {
-            throw Error.EEXIST.exception(path);
-          }
+      InMemoryDirectoryInfo parent = getDirectory(parentDir);
+      InMemoryContentInfo child = parent.getChild(name);
+      if (child != null) { // already exists
+        if (!child.isDirectory()) {
+          throw Errno.EEXIST.exception(path);
         }
-
-        InMemoryDirectoryInfo newDir = new InMemoryDirectoryInfo(clock);
-        newDir.addChild(".", newDir);
-        newDir.addChild("..", parent);
-        insert(parent, path.getBaseName(), newDir, path);
-
-        return true;
+        return false;
       }
+      error = insertChildDirectory(parent, new InMemoryDirectoryInfo(clock), name);
     }
+    if (error != null) {
+      throw error.exception(path);
+    }
+    return true;
+  }
 
-    // If we get here, we're out of scope.
-    return getDelegatedPath(parent.getEscapingPath(), path).createDirectory();
+  @Nullable
+  private static Errno insertChildDirectory(
+      InMemoryDirectoryInfo parent, InMemoryDirectoryInfo newDir, String name) {
+    newDir.addChild(".", newDir);
+    newDir.addChild("..", parent);
+    return insert(parent, name, newDir);
   }
 
   @Override
-  protected void createSymbolicLink(Path path, PathFragment targetFragment)
-      throws IOException {
-    if (path.equals(rootPath)) { throw Error.EACCES.exception(path); }
+  public void createDirectoryAndParents(PathFragment path) throws IOException {
+    InMemoryContentInfo result =
+        pathWalkErrno(path, OnEnoent.CREATE_DIRECTORY_AND_PARENTS).inodeOrThrow(path);
+    if (!result.isDirectory()) {
+      throw new IOException("Not a directory: " + path);
+    }
+  }
 
-    InMemoryDirectoryInfo parent;
+  @Override
+  protected void createSymbolicLink(PathFragment path, PathFragment targetFragment)
+      throws IOException {
+    if (isRootDirectory(path)) {
+      throw Errno.EACCES.exception(path);
+    }
+
     synchronized (this) {
-      parent = getDirectory(path.getParentDirectory());
-      if (!parent.outOfScope()) {
-        if (parent.getChild(path.getBaseName()) != null) { throw Error.EEXIST.exception(path); }
-        insert(parent, path.getBaseName(), new InMemoryLinkInfo(clock, targetFragment), path);
-        return;
+      InMemoryDirectoryInfo parent = getDirectory(path.getParentDirectory());
+      if (parent.getChild(baseNameOrWindowsDrive(path)) != null) {
+        throw Errno.EEXIST.exception(path);
       }
+      insert(
+          parent, baseNameOrWindowsDrive(path), new InMemoryLinkInfo(clock, targetFragment), path);
     }
-
-    // If we get here, we're out of scope.
-    getDelegatedPath(parent.getEscapingPath(), path).createSymbolicLink(targetFragment);
   }
 
   @Override
-  protected PathFragment readSymbolicLink(Path path) throws IOException {
-    InMemoryContentInfo status = scopeLimitedStat(path, false);
-    if (status.outOfScope()) {
-      return getDelegatedPath(status.getEscapingPath()).readSymbolicLink();
-    } else if (status.isSymbolicLink()) {
-      Preconditions.checkState(status instanceof InMemoryLinkInfo);
+  protected PathFragment readSymbolicLink(PathFragment path) throws IOException {
+    InMemoryContentInfo status = inodeStat(path, false);
+    if (status.isSymbolicLink()) {
+      Preconditions.checkState(status instanceof InMemoryLinkInfo, status);
       return ((InMemoryLinkInfo) status).getLinkContent();
-    } else {
-        throw new NotASymlinkException(path);
     }
+    throw new NotASymlinkException(path);
   }
 
   @Override
-  protected long getFileSize(Path path, boolean followSymlinks)
-      throws IOException {
+  protected long getFileSize(PathFragment path, boolean followSymlinks) throws IOException {
     return stat(path, followSymlinks).getSize();
   }
 
   @Override
-  protected Collection<Path> getDirectoryEntries(Path path) throws IOException {
-    InMemoryDirectoryInfo dirInfo;
-    synchronized (this) {
-      dirInfo = getDirectory(path);
-      if (!dirInfo.outOfScope()) {
-        FileStatus status = stat(path, false);
-        Preconditions.checkState(status instanceof InMemoryContentInfo);
-        if (!((InMemoryContentInfo) status).isReadable()) {
-          throw new IOException("Directory is not readable");
-        }
-
-        Set<String> allChildren = dirInfo.getAllChildren();
-        List<Path> result = new ArrayList<>(allChildren.size());
-        for (String child : allChildren) {
-          if (!(child.equals(".") || child.equals(".."))) {
-            result.add(path.getChild(child));
-          }
-        }
-        return result;
-      }
-    }
-
-    // If we get here, we're out of scope.
-    return getDelegatedPath(dirInfo.getEscapingPath()).getDirectoryEntries();
-  }
-
-  @Override
-  protected boolean delete(Path path) throws IOException {
-    if (path.equals(rootPath)) { throw Error.EBUSY.exception(path); }
-    if (!exists(path, false)) { return false; }
-
-    InMemoryDirectoryInfo parent;
-    synchronized (this) {
-      parent = getDirectory(path.getParentDirectory());
-      if (!parent.outOfScope()) {
-        InMemoryContentInfo child = parent.getChild(path.getBaseName());
-        if (child.isDirectory() && child.getSize() > 2) { throw Error.ENOTEMPTY.exception(path); }
-        unlink(parent, path.getBaseName(), path);
-        return true;
-      }
-    }
-
-    // If we get here, we're out of scope.
-    return getDelegatedPath(parent.getEscapingPath(), path).delete();
-  }
-
-  @Override
-  protected long getLastModifiedTime(Path path, boolean followSymlinks)
+  protected synchronized Collection<String> getDirectoryEntries(PathFragment path)
       throws IOException {
+    InMemoryDirectoryInfo dirInfo = getDirectory(path);
+    if (!dirInfo.isReadable()) {
+      throw Errno.EACCES.exception(path);
+    }
+
+    Collection<String> allChildren = dirInfo.getAllChildren();
+    List<String> result = new ArrayList<>(allChildren.size());
+    for (String child : allChildren) {
+      if (!child.equals(".") && !child.equals("..")) {
+        result.add(child);
+      }
+    }
+    return result;
+  }
+
+  @Override
+  protected boolean delete(PathFragment path) throws IOException {
+    if (isRootDirectory(path)) {
+      throw Errno.EBUSY.exception(path);
+    }
+
+    synchronized (this) {
+      if (!exists(path, /*followSymlinks=*/ false)) {
+        return false;
+      }
+      InMemoryDirectoryInfo parent = getDirectory(path.getParentDirectory());
+      InMemoryContentInfo child = parent.getChild(baseNameOrWindowsDrive(path));
+      if (child.isDirectory() && child.getSize() > 2) {
+        throw Errno.ENOTEMPTY.exception(path);
+      }
+      unlink(parent, baseNameOrWindowsDrive(path), path);
+      return true;
+    }
+  }
+
+  @Override
+  protected long getLastModifiedTime(PathFragment path, boolean followSymlinks) throws IOException {
     return stat(path, followSymlinks).getLastModifiedTime();
   }
 
   @Override
-  protected void setLastModifiedTime(Path path, long newTime) throws IOException {
-    InMemoryContentInfo status;
-    synchronized (this) {
-      status = scopeLimitedStat(path, true);
-      if (!status.outOfScope()) {
-        status.setLastModifiedTime(newTime == -1L
-                                   ? clock.currentTimeMillis()
-                                   : newTime);
-        return;
-      }
-    }
-
-    // If we get here, we're out of scope.
-    getDelegatedPath(status.getEscapingPath()).setLastModifiedTime(newTime);
+  public synchronized void setLastModifiedTime(PathFragment path, long newTime) throws IOException {
+    InMemoryContentInfo status = inodeStat(path, true);
+    status.setLastModifiedTime(newTime == -1L ? clock.currentTimeMillis() : newTime);
   }
 
   @Override
-  protected InputStream getInputStream(Path path) throws IOException {
-    InMemoryContentInfo status;
-    synchronized (this) {
-      status = scopeLimitedStat(path, true);
-      if (!status.outOfScope()) {
-        if (status.isDirectory()) { throw Error.EISDIR.exception(path); }
-        if (!path.isReadable()) { throw Error.EACCES.exception(path); }
-        Preconditions.checkState(status instanceof FileInfo);
-        return new ByteArrayInputStream(((FileInfo) status).readContent());
-      }
-    }
-
-    // If we get here, we're out of scope.
-    return getDelegatedPath(status.getEscapingPath()).getInputStream();
+  protected synchronized InputStream getInputStream(PathFragment path) throws IOException {
+    return statFile(path).getInputStream();
   }
 
-  /**
-   * Creates a new file at the given path and returns its inode. If the path
-   * escapes this file system's scope, trivially returns an "out of scope" status.
-   * Calling code should check for both possibilities via
-   * {@link ScopeEscapableStatus#outOfScope}.
-   */
-  protected InMemoryContentInfo getOrCreateWritableInode(Path path)
+  @Override
+  protected synchronized ReadableByteChannel createReadableByteChannel(PathFragment path)
       throws IOException {
+    return statFile(path).createReadableByteChannel();
+  }
+
+  @Override
+  protected synchronized byte[] getFastDigest(PathFragment path) throws IOException {
+    return statFile(path).getFastDigest();
+  }
+
+  private FileInfo statFile(PathFragment path) throws IOException {
+    InMemoryContentInfo status = inodeStat(path, /*followSymlinks=*/ true);
+    if (status.isDirectory()) {
+      throw Errno.EISDIR.exception(path);
+    }
+    if (!status.isReadable()) {
+      throw Errno.EACCES.exception(path);
+    }
+    Preconditions.checkState(status instanceof FileInfo, status);
+    return (FileInfo) status;
+  }
+
+  @Override
+  @Nullable
+  public synchronized byte[] getxattr(PathFragment path, String name, boolean followSymlinks)
+      throws IOException {
+    InMemoryContentInfo status = inodeStat(path, followSymlinks);
+    if (status.isDirectory()) {
+      throw Errno.EISDIR.exception(path);
+    }
+    if (!isReadable(path)) {
+      throw Errno.EACCES.exception(path);
+    }
+    if (!followSymlinks && status.isSymbolicLink()) {
+      return null; // xattr on symlinks not supported.
+    }
+    Preconditions.checkState(status instanceof FileInfo, status);
+    return ((FileInfo) status).getxattr(name);
+  }
+
+  /** Creates a new file at the given path and returns its inode. */
+  protected InMemoryContentInfo getOrCreateWritableInode(PathFragment path) throws IOException {
     // open(WR_ONLY) of a dangling link writes through the link.  That means
     // that the usual path lookup operations have to behave differently when
     // resolving a path with the intent to create it: instead of failing with
     // ENOENT they have to return an open file.  This is exactly how UNIX
     // kernels do it, which is what we're trying to emulate.
-    InMemoryContentInfo child = pathWalk(path, /*create=*/true);
-    Preconditions.checkNotNull(child);
-    if (child.outOfScope()) {
-      return child;
-    } else if (child.isDirectory()) {
-      throw Error.EISDIR.exception(path);
-    } else { // existing or newly-created file
-      if (!child.isWritable()) { throw Error.EACCES.exception(path); }
-      return child;
+    InMemoryContentInfo child = pathWalkErrno(path, OnEnoent.CREATE_FILE).inodeOrThrow(path);
+    if (child.isDirectory()) {
+      throw Errno.EISDIR.exception(path);
     }
+    if (!child.isWritable()) {
+      throw Errno.EACCES.exception(path);
+    }
+    return child;
   }
 
   @Override
-  protected OutputStream getOutputStream(Path path, boolean append)
+  protected synchronized OutputStream getOutputStream(PathFragment path, boolean append)
       throws IOException {
-    InMemoryContentInfo status;
+    InMemoryContentInfo status = getOrCreateWritableInode(path);
+    return ((FileInfo) status).getOutputStream(append);
+  }
+
+  @Override
+  public void renameTo(PathFragment sourcePath, PathFragment targetPath) throws IOException {
+    if (isRootDirectory(sourcePath)) {
+      throw Errno.EACCES.exception(sourcePath);
+    }
+    if (isRootDirectory(targetPath)) {
+      throw Errno.EACCES.exception(targetPath);
+    }
     synchronized (this) {
-      status = getOrCreateWritableInode(path);
-      if (!status.outOfScope()) {
-        return ((FileInfo) getOrCreateWritableInode(path)).getOutputStream(append);
+      InMemoryDirectoryInfo sourceParent = getDirectory(sourcePath.getParentDirectory());
+      InMemoryDirectoryInfo targetParent = getDirectory(targetPath.getParentDirectory());
+
+      InMemoryContentInfo sourceInode = sourceParent.getChild(baseNameOrWindowsDrive(sourcePath));
+      if (sourceInode == null) {
+        throw Errno.ENOENT.exception(sourcePath);
       }
-    }
-    // If we get here, we're out of scope.
-    return getDelegatedPath(status.getEscapingPath()).getOutputStream(append);
-  }
+      InMemoryContentInfo targetInode = targetParent.getChild(baseNameOrWindowsDrive(targetPath));
 
-  @Override
-  protected void renameTo(Path sourcePath, Path targetPath)
-      throws IOException {
-    if (sourcePath.equals(rootPath)) { throw Error.EACCES.exception(sourcePath); }
-    if (targetPath.equals(rootPath)) { throw Error.EACCES.exception(targetPath); }
+      unlink(sourceParent, baseNameOrWindowsDrive(sourcePath), sourcePath);
+      try {
+        // TODO(bazel-team): (2009) test with symbolic links.
 
-    InMemoryDirectoryInfo sourceParent;
-    InMemoryDirectoryInfo targetParent;
-
-    synchronized (this) {
-      sourceParent = getDirectory(sourcePath.getParentDirectory());
-      targetParent = getDirectory(targetPath.getParentDirectory());
-
-      // Handle the rename if both paths are within our scope.
-      if (!sourceParent.outOfScope() && !targetParent.outOfScope()) {
-        InMemoryContentInfo sourceInode = sourceParent.getChild(sourcePath.getBaseName());
-        if (sourceInode == null) { throw Error.ENOENT.exception(sourcePath); }
-        InMemoryContentInfo targetInode = targetParent.getChild(targetPath.getBaseName());
-
-        unlink(sourceParent, sourcePath.getBaseName(), sourcePath);
-        try {
-          // TODO(bazel-team): (2009) test with symbolic links.
-
-          // Precondition checks:
-          if (targetInode != null) { // already exists
-            if (targetInode.isDirectory()) {
-              if (!sourceInode.isDirectory()) {
-                throw new IOException(sourcePath + " -> " + targetPath + " (" + Error.EISDIR + ")");
-              }
-              if (targetInode.getSize() > 2) {
-                throw Error.ENOTEMPTY.exception(targetPath);
-              }
-            } else if (sourceInode.isDirectory()) {
-              throw new IOException(sourcePath + " -> " + targetPath + " (" + Error.ENOTDIR + ")");
+        // Precondition checks:
+        if (targetInode != null) { // already exists
+          if (targetInode.isDirectory()) {
+            if (!sourceInode.isDirectory()) {
+              throw new IOException(sourcePath + " -> " + targetPath + " (" + Errno.EISDIR + ")");
             }
-            unlink(targetParent, targetPath.getBaseName(), targetPath);
+            if (targetInode.getSize() > 2) {
+              throw Errno.ENOTEMPTY.exception(targetPath);
+            }
+          } else if (sourceInode.isDirectory()) {
+            throw new IOException(sourcePath + " -> " + targetPath + " (" + Errno.ENOTDIR + ")");
           }
-          sourceInode.movedTo(targetPath);
-          insert(targetParent, targetPath.getBaseName(), sourceInode, targetPath);
-          return;
-
-        } catch (IOException e) {
-          sourceInode.movedTo(sourcePath);
-          insert(sourceParent, sourcePath.getBaseName(), sourceInode, sourcePath); // restore source
-          throw e;
+          unlink(targetParent, baseNameOrWindowsDrive(targetPath), targetPath);
         }
+        insert(targetParent, baseNameOrWindowsDrive(targetPath), sourceInode, targetPath);
+      } catch (IOException e) {
+        insert(
+            sourceParent,
+            baseNameOrWindowsDrive(sourcePath),
+            sourceInode,
+            sourcePath); // restore source
+        throw e;
       }
     }
+  }
 
-    // If we get here, either one or both paths is out of scope.
-    if (sourceParent.outOfScope() && targetParent.outOfScope()) {
-      Path delegatedSource = getDelegatedPath(sourceParent.getEscapingPath(), sourcePath);
-      Path delegatedTarget = getDelegatedPath(targetParent.getEscapingPath(), targetPath);
-      delegatedSource.renameTo(delegatedTarget);
-    } else {
-      // We don't support cross-file system renaming.
-      throw Error.EACCES.exception(targetPath);
+  @Override
+  protected void createFSDependentHardLink(PathFragment linkPath, PathFragment originalPath)
+      throws IOException {
+
+    // Same check used when creating a symbolic link
+    if (isRootDirectory(originalPath)) {
+      throw Errno.EACCES.exception(originalPath);
     }
+
+    synchronized (this) {
+      InMemoryDirectoryInfo linkParent = getDirectory(linkPath.getParentDirectory());
+      // Same check used when creating a symbolic link
+      if (linkParent.getChild(baseNameOrWindowsDrive(linkPath)) != null) {
+        throw Errno.EEXIST.exception(linkPath);
+      }
+      insert(
+          linkParent,
+          baseNameOrWindowsDrive(linkPath),
+          getDirectory(originalPath.getParentDirectory())
+              .getChild(baseNameOrWindowsDrive(originalPath)),
+          linkPath);
+    }
+  }
+
+  /**
+   * On Unix the root directory is "/". On Windows there isn't one, so we reach null from
+   * getParentDirectory.
+   */
+  private static boolean isRootDirectory(@Nullable PathFragment path) {
+    return path == null || path.getPathString().equals("/");
+  }
+
+  /**
+   * Returns either the base name of the path, or the drive (if referring to a Windows drive).
+   *
+   * <p>This allows the file system to treat windows drives much like directories.
+   */
+  private static String baseNameOrWindowsDrive(PathFragment path) {
+    String name = path.getBaseName();
+    return !name.isEmpty() ? name : path.getDriveStr();
+  }
+
+  /** Represents either an {@link Errno} or an {@link InMemoryContentInfo}. */
+  protected interface InodeOrErrno {
+
+    @Nullable
+    InMemoryContentInfo inode();
+
+    @Nullable
+    Errno error();
+
+    boolean isError();
+
+    /**
+     * Returns the underlying {@link InMemoryContentInfo} unless this {@link #isError}, in which
+     * case {@link IOException} is thrown, using the given path to construct an error message.
+     */
+    InMemoryContentInfo inodeOrThrow(PathFragment path) throws IOException;
   }
 }

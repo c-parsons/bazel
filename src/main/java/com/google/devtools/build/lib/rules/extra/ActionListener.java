@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,17 +15,18 @@ package com.google.devtools.build.lib.rules.extra;
 
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.extra.ExtraActionMapProvider;
+import com.google.devtools.build.lib.analysis.extra.ExtraActionSpec;
 import com.google.devtools.build.lib.collect.ImmutableSortedKeyListMultimap;
 import com.google.devtools.build.lib.packages.Type;
-import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -35,7 +36,8 @@ import java.util.Set;
  */
 public final class ActionListener implements RuleConfiguredTargetFactory {
   @Override
-  public ConfiguredTarget create(RuleContext ruleContext) {
+  public ConfiguredTarget create(RuleContext ruleContext)
+      throws InterruptedException, RuleErrorException, ActionConflictException {
     // This rule doesn't produce any output when listed as a build target.
     // Only when used via the --experimental_action_listener flag,
     // this rule instructs the build system to add additional outputs.
@@ -66,8 +68,7 @@ public final class ActionListener implements RuleConfiguredTargetFactory {
    */
   private List<ExtraActionSpec> retrieveAndValidateExtraActions(RuleContext ruleContext) {
     List<ExtraActionSpec> extraActions = new ArrayList<>();
-    for (TransitiveInfoCollection prerequisite :
-        ruleContext.getPrerequisites("extra_actions", Mode.TARGET)) {
+    for (TransitiveInfoCollection prerequisite : ruleContext.getPrerequisites("extra_actions")) {
       ExtraActionSpec spec = prerequisite.getProvider(ExtraActionSpec.class);
       if (spec == null) {
         ruleContext.attributeError("extra_actions", String.format("target %s is not an "
@@ -77,8 +78,8 @@ public final class ActionListener implements RuleConfiguredTargetFactory {
       }
     }
     if (extraActions.isEmpty()) {
-      ruleContext.attributeWarning("extra_actions",
-          "No extra_action is specified for this version of blaze.");
+      ruleContext.attributeWarning(
+          "extra_actions", "No extra_action is specified for this version of bazel.");
     }
     return extraActions;
   }

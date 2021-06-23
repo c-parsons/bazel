@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,8 +29,13 @@ package com.google.devtools.build.lib.actions;
 public class AlreadyReportedActionExecutionException extends ActionExecutionException {
 
   public AlreadyReportedActionExecutionException(ActionExecutionException cause) {
-    super(cause.getMessage(), cause.getCause(), cause.getAction(), cause.getRootCauses(),
-        cause.isCatastrophe());
+    super(
+        cause.getMessage(),
+        cause.getCause(),
+        cause.getAction(),
+        cause.getRootCauses(),
+        cause.isCatastrophe(),
+        cause.getDetailedExitCode());
   }
 
   @Override

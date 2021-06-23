@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,82 +13,73 @@
 // limitations under the License.
 package com.google.devtools.build.lib.actions.cache;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.MiddlemanAction;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
+import com.google.devtools.build.lib.actions.Artifact.TreeFileArtifact;
+import com.google.devtools.build.lib.actions.FileArtifactValue;
+import com.google.devtools.build.lib.actions.MetadataProvider;
+import com.google.devtools.build.lib.skyframe.TreeArtifactValue;
 import com.google.devtools.build.lib.vfs.FileStatus;
-
 import java.io.IOException;
+import javax.annotation.Nullable;
 
-/** Retrieves {@link Metadata} of {@link Artifact}s, and inserts virtual metadata as well. */
-public interface MetadataHandler {
-  /**
-   * Returns metadata for the given artifact or null if it does not exist or is intentionally
-   * omitted.
-   *
-   * <p>This should always be used for the inputs to {@link MiddlemanAction}s instead of
-   * {@link #getMetadata(Artifact)} since we may allow non-existent inputs to middlemen.</p>
-   *
-   * @param artifact artifact
-   *
-   * @return metadata instance or null if metadata cannot be obtained.
-   */
-  Metadata getMetadataMaybe(Artifact artifact);
+/** Handles metadata of inputs and outputs during the execution phase. */
+public interface MetadataHandler extends MetadataProvider, MetadataInjector {
 
   /**
-   * Returns metadata for the given artifact or throws an exception if the
-   * metadata could not be obtained.
+   * {@inheritDoc}
    *
-   * @return metadata instance
-   *
-   * @throws IOException if metadata could not be obtained.
+   * <p>Freshly created output files (i.e. from an action that just executed) that require a stat to
+   * obtain the metadata will first be set read-only and executable during this call. This ensures
+   * that the returned metadata has an appropriate ctime, which is affected by chmod. Note that this
+   * does not apply to outputs injected via {@link #injectFile} or {@link #injectTree} since a stat
+   * is not required for them.
    */
-  Metadata getMetadata(Artifact artifact) throws IOException;
+  @Override
+  @Nullable
+  FileArtifactValue getMetadata(ActionInput input) throws IOException;
 
   /** Sets digest for virtual artifacts (e.g. middlemen). {@code digest} must not be null. */
-  void setDigestForVirtualArtifact(Artifact artifact, Digest digest);
+  void setDigestForVirtualArtifact(Artifact artifact, byte[] digest);
 
   /**
-   * Injects provided digest into the metadata handler, simultaneously caching lstat() data as well.
-   */
-  void injectDigest(ActionInput output, FileStatus statNoFollow, byte[] digest);
-
-  /**
-   * Marks an artifact as intentionally omitted. Acknowledges that this Artifact could have
-   * existed, but was intentionally not saved, most likely as an optimization.
-   */
-  void markOmitted(ActionInput output);
-
-  /**
-   * Returns true iff artifact exists.
+   * Constructs a {@link FileArtifactValue} for the given output whose digest is known.
    *
-   * <p>It is important to note that implementations may cache non-existence as a side effect
-   * of this method. If there is a possibility an artifact was intentionally omitted then
-   * {@link #artifactOmitted(Artifact)} should be checked first to avoid the side effect.</p>
+   * <p>This call does not inject the returned metadata. It should be injected with a followup call
+   * to {@link #injectFile} or {@link #injectTree} as appropriate.
+   *
+   * <p>chmod will not be called on the output.
    */
-  boolean artifactExists(Artifact artifact);
+  FileArtifactValue constructMetadataForDigest(
+      Artifact output, FileStatus statNoFollow, byte[] injectedDigest) throws IOException;
 
-  /** Returns true iff artifact is a regular file. */
-  boolean isRegularFile(Artifact artifact);
+  /**
+   * Retrieves the children of a tree artifact, returning an empty set if there is no data
+   * available.
+   */
+  ImmutableSet<TreeFileArtifact> getTreeArtifactChildren(SpecialArtifact treeArtifact);
 
-  /** Returns true iff artifact was intentionally omitted (not saved). */
+  /** Retrieves the metadata for this tree artifact. Data should already be available. */
+  TreeArtifactValue getTreeArtifactValue(SpecialArtifact treeArtifact) throws IOException;
+
+  /**
+   * Marks an {@link Artifact} as intentionally omitted.
+   *
+   * <p>This is used as an optimization to not download <em>orphaned</em> artifacts (artifacts that
+   * no action depends on) from a remote system.
+   */
+  void markOmitted(Artifact output);
+
+  /** Returns {@code true} if {@link #markOmitted} was called on the artifact. */
   boolean artifactOmitted(Artifact artifact);
 
   /**
-   * @return Whether the artifact's data was injected.
-   * @throws IOException if implementation tried to stat artifact which threw an exception.
-   *         Technically, this means that the artifact could not have been injected, but by throwing
-   *         here we save the caller trying to stat this file on their own and throwing the same
-   *         exception. Implementations are not guaranteed to throw in this case if they are able to
-   *         determine that the artifact is not injected without statting it.
+   * Discards any cached metadata for the given outputs.
+   *
+   * <p>May be called if an action can make multiple attempts that are expected to create the same
+   * set of output files.
    */
-  boolean isInjected(Artifact artifact) throws IOException;
-
-  /**
-   * Discards all known output artifact metadata, presumably because outputs will be modified.
-   * May only be called before any metadata is injected using {@link #injectDigest} or
-   * {@link #markOmitted};
-   */
-  void discardOutputMetadata();
-
+  void resetOutputs(Iterable<? extends Artifact> outputs);
 }

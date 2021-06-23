@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,15 +17,23 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
+import com.google.common.flogger.GoogleLogger;
+import com.google.devtools.build.lib.actions.cache.Protos.ActionCacheStatistics;
+import com.google.devtools.build.lib.actions.cache.Protos.ActionCacheStatistics.MissReason;
+import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ConditionallyThreadSafe;
-import com.google.devtools.build.lib.util.Clock;
-import com.google.devtools.build.lib.util.CompactStringIndexer;
+import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.profiler.AutoProfiler;
+import com.google.devtools.build.lib.profiler.GoogleAutoProfilerUtils;
 import com.google.devtools.build.lib.util.PersistentMap;
 import com.google.devtools.build.lib.util.StringIndexer;
 import com.google.devtools.build.lib.util.VarInt;
+import com.google.devtools.build.lib.vfs.DigestUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.UnixGlob;
-
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -33,50 +41,62 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.Collection;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * An implementation of the ActionCache interface that uses
- * {@link CompactStringIndexer} to reduce memory footprint and saves
- * cached actions using the {@link PersistentMap}.
- *
- * <p>This cache is not fully correct: as hashes are xor'd together, a permutation of input
- * file contents will erroneously be considered up to date.
+ * An implementation of the ActionCache interface that uses a {@link StringIndexer} to reduce memory
+ * footprint and saves cached actions using the {@link PersistentMap}.
  */
 @ConditionallyThreadSafe // condition: each instance must instantiated with
-                         // different cache root
+// different cache root
 public class CompactPersistentActionCache implements ActionCache {
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
   private static final int SAVE_INTERVAL_SECONDS = 3;
-  private static final long NANOS_PER_SECOND = 1000 * 1000 * 1000;
+  // Log if periodically saving the action cache incurs more than 5% overhead.
+  private static final Duration MIN_TIME_FOR_LOGGING =
+      Duration.ofSeconds(SAVE_INTERVAL_SECONDS).dividedBy(20);
 
   // Key of the action cache record that holds information used to verify referential integrity
   // between action cache and string indexer. Must be < 0 to avoid conflict with real action
   // cache records.
   private static final int VALIDATION_KEY = -10;
 
-  private static final int VERSION = 10;
+  private static final int NO_INPUT_DISCOVERY_COUNT = -1;
 
-  private final class ActionMap extends PersistentMap<Integer, byte[]> {
+  private static final int VERSION = 12;
+
+  private static final class ActionMap extends PersistentMap<Integer, byte[]> {
     private final Clock clock;
-    private long nextUpdate;
+    private final PersistentStringIndexer indexer;
+    private long nextUpdateSecs;
 
-    public ActionMap(Map<Integer, byte[]> map, Clock clock, Path mapFile, Path journalFile)
+    public ActionMap(
+        Map<Integer, byte[]> map,
+        PersistentStringIndexer indexer,
+        Clock clock,
+        Path mapFile,
+        Path journalFile)
         throws IOException {
       super(VERSION, map, mapFile, journalFile);
+      this.indexer = indexer;
       this.clock = clock;
       // Using nanoTime. currentTimeMillis may not provide enough granularity.
-      nextUpdate = clock.nanoTime() / NANOS_PER_SECOND + SAVE_INTERVAL_SECONDS;
+      nextUpdateSecs = TimeUnit.NANOSECONDS.toSeconds(clock.nanoTime()) + SAVE_INTERVAL_SECONDS;
       load();
     }
 
     @Override
     protected boolean updateJournal() {
       // Using nanoTime. currentTimeMillis may not provide enough granularity.
-      long time = clock.nanoTime() / NANOS_PER_SECOND;
-      if (SAVE_INTERVAL_SECONDS == 0 || time > nextUpdate) {
-        nextUpdate = time + SAVE_INTERVAL_SECONDS;
+      long timeSecs = TimeUnit.NANOSECONDS.toSeconds(clock.nanoTime());
+      if (SAVE_INTERVAL_SECONDS == 0 || timeSecs > nextUpdateSecs) {
+        nextUpdateSecs = timeSecs + SAVE_INTERVAL_SECONDS;
         // Force flushing of the PersistentStringIndexer instance. This is needed to ensure
         // that filename index data on disk is always up-to-date when we save action cache
         // data.
@@ -84,6 +104,14 @@ public class CompactPersistentActionCache implements ActionCache {
         return true;
       }
       return false;
+    }
+
+    @Override
+    protected void markAsDirty() {
+      try (AutoProfiler p =
+          GoogleAutoProfilerUtils.logged("slow write to journal", MIN_TIME_FOR_LOGGING)) {
+        super.markAsDirty();
+      }
     }
 
     @Override
@@ -134,11 +162,34 @@ public class CompactPersistentActionCache implements ActionCache {
     }
   }
 
-  private final PersistentMap<Integer, byte[]> map;
   private final PersistentStringIndexer indexer;
-  static final ActionCache.Entry CORRUPTED = new ActionCache.Entry(null);
+  private final PersistentMap<Integer, byte[]> map;
+  private final ImmutableMap<MissReason, AtomicInteger> misses;
+  private final AtomicInteger hits = new AtomicInteger();
 
-  public CompactPersistentActionCache(Path cacheRoot, Clock clock) throws IOException {
+  private CompactPersistentActionCache(
+      PersistentStringIndexer indexer,
+      PersistentMap<Integer, byte[]> map,
+      ImmutableMap<MissReason, AtomicInteger> misses) {
+    this.indexer = indexer;
+    this.map = map;
+    this.misses = misses;
+  }
+
+  public static CompactPersistentActionCache create(
+      Path cacheRoot, Clock clock, EventHandler reporterForInitializationErrors)
+      throws IOException {
+    return create(
+        cacheRoot, clock, reporterForInitializationErrors, /*alreadyFoundCorruption=*/ false);
+  }
+
+  private static CompactPersistentActionCache create(
+      Path cacheRoot,
+      Clock clock,
+      EventHandler reporterForInitializationErrors,
+      boolean alreadyFoundCorruption)
+      throws IOException {
+    PersistentMap<Integer, byte[]> map;
     Path cacheFile = cacheFile(cacheRoot);
     Path journalFile = journalFile(cacheRoot);
     Path indexFile = cacheRoot.getChild("filename_index_v" + VERSION + ".blaze");
@@ -146,28 +197,80 @@ public class CompactPersistentActionCache implements ActionCache {
     // will manually purge records from the action cache.
     Map<Integer, byte[]> backingMap = new HashMap<>();
 
+    PersistentStringIndexer indexer;
     try {
       indexer = PersistentStringIndexer.newPersistentStringIndexer(indexFile, clock);
     } catch (IOException e) {
-      renameCorruptedFiles(cacheRoot);
-      throw new IOException("Failed to load filename index data", e);
+      return logAndThrowOrRecurse(
+          cacheRoot,
+          clock,
+          "Failed to load filename index data",
+          e,
+          reporterForInitializationErrors,
+          alreadyFoundCorruption);
     }
 
     try {
-      map = new ActionMap(backingMap, clock, cacheFile, journalFile);
+      map = new ActionMap(backingMap, indexer, clock, cacheFile, journalFile);
     } catch (IOException e) {
-      renameCorruptedFiles(cacheRoot);
-      throw new IOException("Failed to load action cache data", e);
+      return logAndThrowOrRecurse(
+          cacheRoot,
+          clock,
+          "Failed to load action cache data",
+          e,
+          reporterForInitializationErrors,
+          alreadyFoundCorruption);
     }
 
     // Validate referential integrity between two collections.
     if (!map.isEmpty()) {
-      String integrityError = validateIntegrity(indexer.size(), map.get(VALIDATION_KEY));
-      if (integrityError != null) {
-        renameCorruptedFiles(cacheRoot);
-        throw new IOException("Failed action cache referential integrity check: " + integrityError);
+      try {
+        validateIntegrity(indexer.size(), map.get(VALIDATION_KEY));
+      } catch (IOException e) {
+        return logAndThrowOrRecurse(
+            cacheRoot, clock, null, e, reporterForInitializationErrors, alreadyFoundCorruption);
       }
     }
+
+    // Populate the map now, so that concurrent updates to the values can happen safely.
+    Map<MissReason, AtomicInteger> misses = new EnumMap<>(MissReason.class);
+    for (MissReason reason : MissReason.values()) {
+      if (reason == MissReason.UNRECOGNIZED) {
+        // The presence of this enum value is a protobuf artifact and confuses our metrics
+        // externalization code below. Just skip it.
+        continue;
+      }
+      misses.put(reason, new AtomicInteger(0));
+    }
+    return new CompactPersistentActionCache(indexer, map, Maps.immutableEnumMap(misses));
+  }
+
+  private static CompactPersistentActionCache logAndThrowOrRecurse(
+      Path cacheRoot,
+      Clock clock,
+      String message,
+      IOException e,
+      EventHandler reporterForInitializationErrors,
+      boolean alreadyFoundCorruption)
+      throws IOException {
+    renameCorruptedFiles(cacheRoot);
+    if (message != null) {
+      e = new IOException(message, e);
+    }
+    logger.atWarning().withCause(e).log("Failed to load action cache");
+    reporterForInitializationErrors.handle(
+        Event.error(
+            "Error during action cache initialization: "
+                + e.getMessage()
+                + ". Corrupted files were renamed to '"
+                + cacheRoot
+                + "/*.bad'. "
+                + "Bazel will now reset action cache data, potentially causing rebuilds"));
+    if (alreadyFoundCorruption) {
+      throw e;
+    }
+    return create(
+        cacheRoot, clock, reporterForInitializationErrors, /*alreadyFoundCorruption=*/ true);
   }
 
   /**
@@ -184,32 +287,36 @@ public class CompactPersistentActionCache implements ActionCache {
           .glob()) {
         path.renameTo(path.getParentDirectory().getChild(path.getBaseName() + ".bad"));
       }
+    } catch (UnixGlob.BadPattern ex) {
+      throw new IllegalStateException(ex); // can't happen
     } catch (IOException e) {
-      // do nothing
+      logger.atWarning().withCause(e).log("Unable to rename corrupted action cache files");
     }
   }
 
-  /**
-   * @return non-null error description if indexer contains no data or integrity check has failed,
-   *     and null otherwise
-   */
-  private static String validateIntegrity(int indexerSize, byte[] validationRecord) {
+  private static final String FAILURE_PREFIX = "Failed action cache referential integrity check: ";
+  /** Throws IOException if indexer contains no data or integrity check has failed. */
+  private static void validateIntegrity(int indexerSize, byte[] validationRecord)
+      throws IOException {
     if (indexerSize == 0) {
-      return "empty index";
+      throw new IOException(FAILURE_PREFIX + "empty index");
     }
     if (validationRecord == null) {
-      return "no validation record";
+      throw new IOException(FAILURE_PREFIX + "no validation record");
     }
     try {
       int validationSize = ByteBuffer.wrap(validationRecord).asIntBuffer().get();
-      if (validationSize <= indexerSize) {
-        return null;
-      } else {
-        return String.format("Validation mismatch: validation entry %d is too large " +
-                             "compared to index size %d", validationSize, indexerSize);
+      if (validationSize > indexerSize) {
+        throw new IOException(
+            String.format(
+                FAILURE_PREFIX
+                    + "Validation mismatch: validation entry %d is too large "
+                    + "compared to index size %d",
+                validationSize,
+                indexerSize));
       }
     } catch (BufferUnderflowException e) {
-      return e.getMessage();
+      throw new IOException(FAILURE_PREFIX + e.getMessage(), e);
     }
   }
 
@@ -219,11 +326,6 @@ public class CompactPersistentActionCache implements ActionCache {
 
   public static Path journalFile(Path cacheRoot) {
     return cacheRoot.getChild("action_journal_v" + VERSION + ".blaze");
-  }
-
-  @Override
-  public ActionCache.Entry createEntry(String key) {
-    return new ActionCache.Entry(key);
   }
 
   @Override
@@ -240,7 +342,7 @@ public class CompactPersistentActionCache implements ActionCache {
       return data != null ? CompactPersistentActionCache.decode(indexer, data) : null;
     } catch (IOException e) {
       // return entry marked as corrupted.
-      return CORRUPTED;
+      return ActionCache.Entry.CORRUPTED;
     }
   }
 
@@ -276,6 +378,12 @@ public class CompactPersistentActionCache implements ActionCache {
     long indexSize = indexer.save();
     long mapSize = map.save();
     return indexSize + mapSize;
+  }
+
+  @Override
+  public void clear() {
+    indexer.clear();
+    map.clear();
   }
 
   @Override
@@ -337,22 +445,31 @@ public class CompactPersistentActionCache implements ActionCache {
       // Estimate the size of the buffer:
       //   5 bytes max for the actionKey length
       // + the actionKey itself
-      // + 16 bytes for the digest
+      // + 32 bytes for the digest
       // + 5 bytes max for the file list length
       // + 5 bytes max for each file id
-      int maxSize = VarInt.MAX_VARINT_SIZE + actionKeyBytes.length + Digest.MD5_SIZE
-          + VarInt.MAX_VARINT_SIZE + files.size() * VarInt.MAX_VARINT_SIZE;
+      // + 32 bytes for the environment digest
+      int maxSize =
+          VarInt.MAX_VARINT_SIZE
+              + actionKeyBytes.length
+              + DigestUtils.ESTIMATED_SIZE
+              + VarInt.MAX_VARINT_SIZE
+              + files.size() * VarInt.MAX_VARINT_SIZE
+              + DigestUtils.ESTIMATED_SIZE;
       ByteArrayOutputStream sink = new ByteArrayOutputStream(maxSize);
 
       VarInt.putVarInt(actionKeyBytes.length, sink);
       sink.write(actionKeyBytes);
 
-      entry.getFileDigest().write(sink);
+      MetadataDigestUtils.write(entry.getFileDigest(), sink);
 
-      VarInt.putVarInt(files.size(), sink);
+      VarInt.putVarInt(entry.discoversInputs() ? files.size() : NO_INPUT_DISCOVERY_COUNT, sink);
       for (String file : files) {
         VarInt.putVarInt(indexer.getOrCreateIndex(file), sink);
       }
+
+      MetadataDigestUtils.write(entry.getUsedClientEnvDigest(), sink);
+
       return sink.toByteArray();
     } catch (IOException e) {
       // This Exception can never be thrown by ByteArrayOutputStream.
@@ -373,24 +490,68 @@ public class CompactPersistentActionCache implements ActionCache {
       source.get(actionKeyBytes);
       String actionKey = new String(actionKeyBytes, ISO_8859_1);
 
-      Digest digest = Digest.read(source);
+      byte[] digest = MetadataDigestUtils.read(source);
 
       int count = VarInt.getVarInt(source);
-      ImmutableList.Builder<String> builder = new ImmutableList.Builder<>();
-      for (int i = 0; i < count; i++) {
-        int id = VarInt.getVarInt(source);
-        String filename = (id >= 0 ? indexer.getStringForIndex(id) : null);
-        if (filename == null) {
-          throw new IOException("Corrupted file index");
-        }
-        builder.add(filename);
+      if (count != NO_INPUT_DISCOVERY_COUNT && count < 0) {
+        throw new IOException("Negative discovered file count: " + count);
       }
+      ImmutableList<String> files = null;
+      if (count != NO_INPUT_DISCOVERY_COUNT) {
+        ImmutableList.Builder<String> builder = ImmutableList.builderWithExpectedSize(count);
+        for (int i = 0; i < count; i++) {
+          int id = VarInt.getVarInt(source);
+          String filename = (id >= 0 ? indexer.getStringForIndex(id) : null);
+          if (filename == null) {
+            throw new IOException("Corrupted file index");
+          }
+          builder.add(filename);
+        }
+        files = builder.build();
+      }
+
+      byte[] usedClientEnvDigest = MetadataDigestUtils.read(source);
+
       if (source.remaining() > 0) {
         throw new IOException("serialized entry data has not been fully decoded");
       }
-      return new Entry(actionKey, builder.build(), digest);
+      return new ActionCache.Entry(actionKey, usedClientEnvDigest, files, digest);
     } catch (BufferUnderflowException e) {
       throw new IOException("encoded entry data is incomplete", e);
+    }
+  }
+
+  @Override
+  public void accountHit() {
+    hits.incrementAndGet();
+  }
+
+  @Override
+  public void accountMiss(MissReason reason) {
+    AtomicInteger counter = misses.get(reason);
+    Preconditions.checkNotNull(counter, "Miss reason %s was not registered in the misses map "
+        + "during cache construction", reason);
+    counter.incrementAndGet();
+  }
+
+  @Override
+  public void mergeIntoActionCacheStatistics(ActionCacheStatistics.Builder builder) {
+    builder.setHits(hits.get());
+
+    int totalMisses = 0;
+    for (Map.Entry<MissReason, AtomicInteger> entry : misses.entrySet()) {
+      int count = entry.getValue().get();
+      builder.addMissDetailsBuilder().setReason(entry.getKey()).setCount(count);
+      totalMisses += count;
+    }
+    builder.setMisses(totalMisses);
+  }
+
+  @Override
+  public void resetStatistics() {
+    hits.set(0);
+    for (Map.Entry<MissReason, AtomicInteger> entry : misses.entrySet()) {
+      entry.getValue().set(0);
     }
   }
 }

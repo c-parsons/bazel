@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,31 +14,19 @@
 
 package com.google.devtools.build.lib.packages;
 
-import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.License.DistributionType;
-import com.google.devtools.build.lib.syntax.Label;
-import com.google.devtools.build.lib.syntax.SkylarkCallable;
-import com.google.devtools.build.lib.syntax.SkylarkModule;
-
+import com.google.devtools.build.lib.starlarkbuildapi.TargetApi;
 import java.util.Set;
+import javax.annotation.Nullable;
+import net.starlark.java.syntax.Location;
 
 /**
- *  A node in the build dependency graph, identified by a Label.
+ * A node in the build dependency graph, identified by a Label.
+ *
+ * <p>This StarlarkBuiltin does not contain any documentation since Starlark's Target type refers to
+ * TransitiveInfoCollection.class, which contains the appropriate documentation.
  */
-@SkylarkModule(name = "target", doc = "A BUILD target.")
-public interface Target {
-
-  /**
-   *  Returns the label of this target.  (e.g. "//foo:bar")
-   */
-  @SkylarkCallable(name = "label", doc = "")
-  Label getLabel();
-
-  /**
-   *  Returns the name of this rule (relative to its owning package).
-   */
-  @SkylarkCallable(name = "name", doc = "")
-  String getName();
+public interface Target extends TargetApi {
 
   /**
    *  Returns the Package to which this rule belongs.
@@ -57,6 +45,7 @@ public interface Target {
    * If this is a Rule, returns itself; it this is an OutputFile, returns its
    * generating rule; if this is an input file, returns null.
    */
+  @Nullable
   Rule getAssociatedRule();
 
   /**
@@ -66,6 +55,12 @@ public interface Target {
 
   /**
    * Returns the place where the target was defined.
+   *
+   * <p>The location of a rule instance is generally its "generator location", the location of the
+   * outermost call on the stack, which is in the BUILD file. However, the location of a source file
+   * target created by an explicit call to {@code exports_files} is the location of the innermost
+   * call, which may be in an arbitrary .bzl file and is not necessarily beneath the package's
+   * directory. The inconsistency seems unintentional.
    */
   Location getLocation();
 
@@ -78,4 +73,9 @@ public interface Target {
    * Returns the visibility of this target.
    */
   RuleVisibility getVisibility();
+
+  /**
+   * Returns whether this target type can be configured (e.g. accepts non-null configurations).
+   */
+  boolean isConfigurable();
 }

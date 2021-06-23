@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,12 @@
 package com.google.devtools.build.lib.packages;
 
 import com.google.common.base.Preconditions;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import net.starlark.java.syntax.Location;
 
 /**
  * A file that is an input to the build system.
@@ -33,6 +33,7 @@ import com.google.devtools.build.lib.vfs.PathFragment;
  */
 @Immutable @ThreadSafe
 public final class InputFile extends FileTarget {
+  private final Package pkg;
   private final Location location;
   private final RuleVisibility visibility;
   private final License license;
@@ -42,7 +43,7 @@ public final class InputFile extends FileTarget {
    * the given package, and package-default visibility.
    */
   InputFile(Package pkg, Label label, Location location) {
-    this(pkg, label, location, null, License.NO_LICENSE);
+    this(pkg, label, location, /*visibility=*/ null, License.NO_LICENSE);
   }
 
   /**
@@ -52,10 +53,15 @@ public final class InputFile extends FileTarget {
   InputFile(Package pkg, Label label, Location location, RuleVisibility visibility,
       License license) {
     super(pkg, label);
-    Preconditions.checkNotNull(location);
-    this.location = location;
+    this.pkg = pkg;
+    this.location = Preconditions.checkNotNull(location);
     this.visibility = visibility;
     this.license = license;
+  }
+
+  @Override
+  public Package getPackage() {
+    return pkg;
   }
 
   public boolean isVisibilitySpecified() {
@@ -71,8 +77,13 @@ public final class InputFile extends FileTarget {
     }
   }
 
+  @Override
+  public boolean isConfigurable() {
+    return false;
+  }
+
   public boolean isLicenseSpecified() {
-    return license != null && license != License.NO_LICENSE;
+    return license != null && license.isSpecified();
   }
 
   @Override
@@ -96,20 +107,20 @@ public final class InputFile extends FileTarget {
   }
 
   /**
-   * Returns the exec path of the file, i.e. the path relative to the package source root.
+   * Returns the exec path of the file, i.e. the path relative to the execution root working
+   * directory.
    */
-  public PathFragment getExecPath() {
-    return label.getPackageIdentifier().getPathFragment().getRelative(label.getName());
-  }
-
-  @Override
-  public int hashCode() {
-    return label.hashCode();
+  public PathFragment getExecPath(boolean siblingRepositoryLayout) {
+    return label
+        .getRepository()
+        .getExecPath(siblingRepositoryLayout)
+        .getRelative(label.getPackageName())
+        .getRelative(label.getName());
   }
 
   @Override
   public String getTargetKind() {
-    return "source file";
+    return targetKind();
   }
 
   @Override
@@ -120,5 +131,10 @@ public final class InputFile extends FileTarget {
   @Override
   public Location getLocation() {
     return location;
+  }
+
+  /** Returns the target kind for all input files. */
+  public static String targetKind() {
+    return "source file";
   }
 }

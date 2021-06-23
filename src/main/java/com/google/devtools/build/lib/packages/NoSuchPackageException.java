@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,34 +14,43 @@
 
 package com.google.devtools.build.lib.packages;
 
-import javax.annotation.Nullable;
+import com.google.devtools.build.lib.cmdline.PackageIdentifier;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.FailureDetails.PackageLoading;
+import com.google.devtools.build.lib.util.DetailedExitCode;
 
 /**
- * Exception indicating an attempt to access a package which is not found, does
- * not exist, or can't be parsed into a package.
+ * Exception indicating an attempt to access a package which is not found, does not exist, or can't
+ * be parsed into a package.
+ *
+ * <p>Prefer using more-specific subclasses, when appropriate.
  */
-public abstract class NoSuchPackageException extends NoSuchThingException {
+public class NoSuchPackageException extends NoSuchThingException {
 
   private final PackageIdentifier packageId;
 
   public NoSuchPackageException(PackageIdentifier packageId, String message) {
-    this(packageId, "no such package", message);
-  }
-
-  public NoSuchPackageException(PackageIdentifier packageId, String message,
-      Throwable cause) {
-    this(packageId, "no such package", message, cause);
-  }
-
-  protected NoSuchPackageException(
-      PackageIdentifier packageId, String messagePrefix, String message) {
-    super(messagePrefix + " '" + packageId + "': " + message);
+    super(message);
     this.packageId = packageId;
   }
 
-  protected NoSuchPackageException(PackageIdentifier packageId, String messagePrefix,
-      String message, Throwable cause) {
-    super(messagePrefix + " '" + packageId + "': " + message, cause);
+  public NoSuchPackageException(PackageIdentifier packageId, String message, Exception cause) {
+    super(message, cause);
+    this.packageId = packageId;
+  }
+
+  public NoSuchPackageException(
+      PackageIdentifier packageId, String message, DetailedExitCode detailedExitCode) {
+    super(message, detailedExitCode);
+    this.packageId = packageId;
+  }
+
+  public NoSuchPackageException(
+      PackageIdentifier packageId,
+      String message,
+      Exception cause,
+      DetailedExitCode detailedExitCode) {
+    super(message, cause, detailedExitCode);
     this.packageId = packageId;
   }
 
@@ -49,11 +58,33 @@ public abstract class NoSuchPackageException extends NoSuchThingException {
     return packageId;
   }
 
-  /**
-   * Return the package if parsing completed enough to construct it. May return null.
-   */
-  @Nullable
-  public Package getPackage() {
-    return null;
+  public String getRawMessage() {
+    return super.getMessage();
+  }
+
+  @Override
+  public String getMessage() {
+    return String.format("no such package '%s': %s", packageId, getRawMessage());
+  }
+
+  public boolean hasExplicitDetailedExitCode() {
+    return getUncheckedDetailedExitCode() != null;
+  }
+
+  @Override
+  public DetailedExitCode getDetailedExitCode() {
+    DetailedExitCode uncheckedDetailedExitCode = getUncheckedDetailedExitCode();
+    return uncheckedDetailedExitCode != null
+        ? uncheckedDetailedExitCode
+        : defaultDetailedExitCode();
+  }
+
+  private DetailedExitCode defaultDetailedExitCode() {
+    return DetailedExitCode.of(
+        FailureDetail.newBuilder()
+            .setMessage(getMessage())
+            .setPackageLoading(
+                PackageLoading.newBuilder().setCode(PackageLoading.Code.PACKAGE_MISSING).build())
+            .build());
   }
 }

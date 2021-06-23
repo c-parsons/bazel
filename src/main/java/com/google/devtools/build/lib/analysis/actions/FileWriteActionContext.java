@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis.actions;
 
+import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.actions.AbstractAction;
+import com.google.devtools.build.lib.actions.ActionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
-import com.google.devtools.build.lib.actions.ExecException;
-import com.google.devtools.build.lib.actions.Executor;
-import com.google.devtools.build.lib.actions.Executor.ActionContext;
-import com.google.devtools.build.lib.actions.ResourceSet;
-import com.google.devtools.build.lib.util.io.FileOutErr;
+import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.SpawnContinuation;
 
 /**
  * The action context for {@link AbstractFileWriteAction} instances (technically instances of
@@ -26,19 +26,32 @@ import com.google.devtools.build.lib.util.io.FileOutErr;
  */
 public interface FileWriteActionContext extends ActionContext {
 
-  /**
-   * Performs all the setup and then calls back into the action to write the data.
-   */
-  void exec(Executor executor, AbstractFileWriteAction action, FileOutErr outErr,
-      ActionExecutionContext actionExecutionContext) throws ExecException, InterruptedException;
+  SpawnContinuation beginWriteOutputToFile(
+      AbstractAction action,
+      ActionExecutionContext actionExecutionContext,
+      DeterministicWriter deterministicWriter,
+      boolean makeExecutable,
+      boolean isRemotable,
+      Artifact output)
+      throws InterruptedException;
 
   /**
-   * Returns the estimated resource consumption of the action.
+   * Writes the output created by the {@link DeterministicWriter} to the sole output of the given
+   * action.
    */
-  ResourceSet estimateResourceConsumption(AbstractFileWriteAction action);
-
-  /**
-   * Returns where the action actually runs.
-   */
-  String strategyLocality(AbstractFileWriteAction action);
+  default SpawnContinuation beginWriteOutputToFile(
+      AbstractAction action,
+      ActionExecutionContext actionExecutionContext,
+      DeterministicWriter deterministicWriter,
+      boolean makeExecutable,
+      boolean isRemotable)
+      throws InterruptedException {
+    return beginWriteOutputToFile(
+        action,
+        actionExecutionContext,
+        deterministicWriter,
+        makeExecutable,
+        isRemotable,
+        Iterables.getOnlyElement(action.getOutputs()));
+  }
 }

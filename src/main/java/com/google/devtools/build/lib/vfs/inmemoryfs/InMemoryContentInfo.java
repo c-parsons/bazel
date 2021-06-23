@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,26 +14,26 @@
 package com.google.devtools.build.lib.vfs.inmemoryfs;
 
 import com.google.common.base.Preconditions;
+import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.util.Clock;
-import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
-import java.io.IOException;
+import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem.Errno;
+import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem.InodeOrErrno;
+import javax.annotation.Nullable;
 
 /**
- * This interface defines the function directly supported by the "files" stored
- * in a InMemoryFileSystem. This corresponds to a file or inode in UNIX: it
- * doesn't have a path (it could have many paths due to hard links, or none if
- * it's unlinked, i.e. garbage).
+ * This interface defines the function directly supported by the "files" stored in a
+ * InMemoryFileSystem. This corresponds to a file or inode in UNIX: it doesn't have a path (it could
+ * have many paths due to hard links, or none if it's unlinked, i.e. garbage).
  *
- * <p>This class is thread-safe: instances may be accessed and modified from
- * concurrent threads. Subclasses must preserve this property.
+ * <p>This class is thread-safe: instances may be accessed and modified from concurrent threads.
+ * Subclasses must preserve this property.
  */
 @ThreadSafe
-public abstract class InMemoryContentInfo implements ScopeEscapableStatus {
+public abstract class InMemoryContentInfo implements FileStatus, InodeOrErrno {
 
-  private final Clock clock;
+  protected final Clock clock;
 
   /**
    * Stores the time when the file was last modified. This is atomically updated
@@ -56,15 +56,9 @@ public abstract class InMemoryContentInfo implements ScopeEscapableStatus {
   private volatile boolean isReadable = true;
 
   protected InMemoryContentInfo(Clock clock) {
-    this(clock, true);
-  }
-
-  protected InMemoryContentInfo(Clock clock, boolean isMutable) {
     this.clock = clock;
     // When we create the file, it is modified.
-    if (isMutable) {
-      markModificationTime();
-    }
+    markModificationTime();
   }
 
   /**
@@ -80,10 +74,16 @@ public abstract class InMemoryContentInfo implements ScopeEscapableStatus {
   public abstract boolean isSymbolicLink();
 
   /**
-   * Returns true if the current object is a regular file.
+   * Returns true if the current object is a regular or special file.
    */
   @Override
   public abstract boolean isFile();
+
+  /**
+   * Returns true if the current object is a special file.
+   */
+  @Override
+  public abstract boolean isSpecialFile();
 
   /**
    * Returns the size of the entity denoted by the current object. For files,
@@ -91,7 +91,7 @@ public abstract class InMemoryContentInfo implements ScopeEscapableStatus {
    * size of links is unspecified.
    */
   @Override
-  public abstract long getSize() throws IOException;
+  public abstract long getSize();
 
   /**
    * Returns the time when the entity denoted by the current object was last
@@ -120,6 +120,27 @@ public abstract class InMemoryContentInfo implements ScopeEscapableStatus {
     return System.identityHashCode(this);
   }
 
+  @Override
+  public final InMemoryContentInfo inode() {
+    return this;
+  }
+
+  @Nullable
+  @Override
+  public final Errno error() {
+    return null;
+  }
+
+  @Override
+  public final boolean isError() {
+    return false;
+  }
+
+  @Override
+  public final InMemoryContentInfo inodeOrThrow(PathFragment path) {
+    return this;
+  }
+
   /**
    * Sets the time that denotes when the entity denoted by this object was last
    * modified.
@@ -129,19 +150,15 @@ public abstract class InMemoryContentInfo implements ScopeEscapableStatus {
     markChangeTime();
   }
 
-  /**
-   * Sets the last modification and change times to the current time.
-   */
-  protected synchronized void markModificationTime() {
+  /** Sets the last modification and change times to the current time. */
+  synchronized void markModificationTime() {
     Preconditions.checkState(clock != null);
     lastModifiedTime = clock.currentTimeMillis();
     lastChangeTime = lastModifiedTime;
   }
 
-  /**
-   * Sets the last change time to the current time.
-   */
-  protected synchronized void markChangeTime() {
+  /** Sets the last change time to the current time. */
+  private synchronized void markChangeTime() {
     Preconditions.checkState(clock != null);
     lastChangeTime = clock.currentTimeMillis();
   }
@@ -191,22 +208,7 @@ public abstract class InMemoryContentInfo implements ScopeEscapableStatus {
     return isExecutable;
   }
 
-  @Override
-  public boolean outOfScope() {
-    return false;
-  }
-
-  @Override
-  public PathFragment getEscapingPath() {
-    return null;
-  }
-
-  /**
-   * Called just before this inode is moved.
-   *
-   * @param targetPath where the inode is relocated.
-   * @throws IOException
-   */
-  protected void movedTo(Path targetPath) throws IOException {
+  InMemoryDirectoryInfo asDirectory() {
+    throw new IllegalStateException("Not a directory: " + this);
   }
 }

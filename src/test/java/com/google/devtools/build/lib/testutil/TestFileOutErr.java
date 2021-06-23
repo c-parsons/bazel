@@ -1,4 +1,4 @@
-// Copyright 2014 Google Inc. All rights reserved.
+// Copyright 2014 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,10 +14,10 @@
 package com.google.devtools.build.lib.testutil;
 
 import com.google.devtools.build.lib.util.io.FileOutErr;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
-
 import java.io.File;
 import java.io.IOException;
 
@@ -32,13 +32,14 @@ public class TestFileOutErr extends FileOutErr {
 
   }
 
-  public TestFileOutErr(File root) {
-    super(new FlushingFileRecordingOutputStream(newInMemoryFile(root, "out.log")),
-        new FlushingFileRecordingOutputStream(newInMemoryFile(root, "err.log")));
+  public TestFileOutErr(Path root) {
+    super(
+        new FlushingFileRecordingOutputStream(root.getChild("out.log")),
+        new FlushingFileRecordingOutputStream(root.getChild("err.log")));
   }
 
   private static Path newInMemoryFile(File root, String name) {
-    InMemoryFileSystem inMemFS = new InMemoryFileSystem();
+    InMemoryFileSystem inMemFS = new InMemoryFileSystem(DigestHashFunction.SHA256);
     Path directory = inMemFS.getPath(root.getPath());
     try {
       FileSystemUtils.createDirectoryAndParents(directory);
